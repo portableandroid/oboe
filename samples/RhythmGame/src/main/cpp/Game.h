@@ -17,11 +17,15 @@
 #ifndef RHYTHMGAME_GAME_H
 #define RHYTHMGAME_GAME_H
 
+#include <future>
+
 #include <android/asset_manager.h>
 #include <oboe/Oboe.h>
 
-#include "audio/Mixer.h"
-#include "audio/SoundRecording.h"
+#include "shared/Mixer.h"
+
+#include "audio/Player.h"
+#include "audio/AAssetDataSource.h"
 #include "ui/OpenGLFunctions.h"
 #include "utils/LockFreeQueue.h"
 #include "utils/UtilityFunctions.h"
@@ -29,11 +33,18 @@
 
 using namespace oboe;
 
+
+enum class GameState {
+    Loading,
+    Playing,
+    FailedToLoad
+};
+
 class Game : public AudioStreamCallback {
 public:
-    explicit Game(AAssetManager *assetManager);
-
+    explicit Game(AAssetManager&);
     void start();
+    void stop();
     void onSurfaceCreated();
     void onSurfaceDestroyed();
     void onSurfaceChanged(int widthInPixels, int heightInPixels);
@@ -43,19 +54,30 @@ public:
     // Inherited from oboe::AudioStreamCallback
     DataCallbackResult
     onAudioReady(AudioStream *oboeStream, void *audioData, int32_t numFrames) override;
+    void onErrorAfterClose(AudioStream *oboeStream, Result error) override;
 
 private:
-    AAssetManager *mAssetManager{nullptr};
-    AudioStream *mAudioStream{nullptr};
-    SoundRecording *mClap{nullptr};
-    SoundRecording *mBackingTrack{nullptr};
+    AAssetManager& mAssetManager;
+    AudioStream *mAudioStream { nullptr };
+    std::unique_ptr<Player> mClap;
+    std::unique_ptr<Player> mBackingTrack;
     Mixer mMixer;
+    std::unique_ptr<float[]> mConversionBuffer { nullptr }; // For float->int16 conversion
 
     LockFreeQueue<int64_t, kMaxQueueItems> mClapEvents;
     std::atomic<int64_t> mCurrentFrame { 0 };
+    std::atomic<int64_t> mSongPositionMs { 0 };
     LockFreeQueue<int64_t, kMaxQueueItems> mClapWindows;
     LockFreeQueue<TapResult, kMaxQueueItems> mUiEvents;
     std::atomic<int64_t> mLastUpdateTime { 0 };
+    std::atomic<GameState> mGameState { GameState::Loading };
+    std::future<void> mLoadingResult;
+
+    void load();
+    TapResult getTapResult(int64_t tapTimeInMillis, int64_t tapWindowInMillis);
+    bool openStream();
+    bool setupAudioSources();
+    void scheduleSongEvents();
 };
 
 

@@ -16,20 +16,29 @@
 # Script to build and run the Oboe tests on an attached Android device or emulator
 #
 # Prerequisites: 
-# - CMake on PATH
+# - CMake on PATH. This is usually found in $ANDROID_HOME/cmake/<version>/bin.
 # - ANDROID_NDK environment variable is set to your Android NDK location
-# e.g. /Library/Android/sdk/ndk-bundle
+# e.g. $HOME/Library/Android/sdk/ndk-bundle
 # - Android device or emulator attached and accessible via adb
 #
-# Instructions: 
-# Run this script from within the oboe/tests directory. A directory 'build' will be 
-# created containing the test binary. This binary will then be copied to the device/emulator
-# and executed. 
+# Instructions:
+# - Run this script 
+# - Check the test results on your target device
 #
-# The initial run may take some time as GTest is built, subsequent runs should be much, much
-# faster. 
+# What does the script do?
+# - Builds a test binary for the target architecture
+# - Copies the test binary into the UnitTestRunner app
+# - Builds, installs and runs the app on the target device
 #
-# If you want to perform a clean build just delete the 'build' folder and re-run this script
+# The initial run may take some time as GTest is built, subsequent runs should be much faster. 
+#
+# If you want to perform a clean build just delete the 'build' folder and re-run this script. You will need to do 
+# this if you change target architectures (e.g. when changing between real device and emulator)
+#
+# Why is running the tests so convoluted? 
+# The tests require the RECORDING permission and on many devices (e.g Samsung) the adb user does not have this 
+# permission (and `run-as` is broken). This means that the test binary must be executed by an app which has this 
+# permission, hence the need for the UnitTestRunner app. 
 # 
 ################################################
 
@@ -39,7 +48,9 @@
 BUILD_DIR=build
 CMAKE=cmake
 TEST_BINARY_FILENAME=testOboe
-REMOTE_DIR=/data/local/tmp/oboe
+TEST_RUNNER_DIR=UnitTestRunner
+TEST_RUNNER_PACKAGE_NAME=com.google.oboe.tests.unittestrunner
+TEST_RUNNER_ASSET_DIR=${TEST_RUNNER_DIR}/app/src/main/assets
 
 # Check prerequisites
 if [ -z "$ANDROID_NDK" ]; then
@@ -48,8 +59,9 @@ if [ -z "$ANDROID_NDK" ]; then
 fi
 
 if [ ! $(type -P ${CMAKE}) ]; then
-	echo "${CMAKE} was not found on your path. You can install it using Android Studio using Tools->Android->SDK Manager->SDK Tools."
-	exit 1
+    echo "${CMAKE} was not found on your path. You can install it using Android Studio using Tools->Android->SDK Manager->SDK Tools."
+    echo "Once done you will need to add ${HOME}/Library/Android/sdk/cmake/<current_version>/bin to your path."
+    exit 1
 fi 
 
 # Get the device ABI
@@ -100,11 +112,22 @@ pushd ${BUILD_DIR}
 	
 popd
 
+# Copy the binary into the unit test runner app
+mkdir ${TEST_RUNNER_ASSET_DIR}/${ABI}
+DESTINATION_DIR=${TEST_RUNNER_ASSET_DIR}/${ABI}/${TEST_BINARY_FILENAME}
+echo "Copying binary to ${DESTINATION_DIR}"
+cp ${BUILD_DIR}/${TEST_BINARY_FILENAME} ${DESTINATION_DIR}
 
-# Push the test binary to the device and run it
-echo "Pushing test binary to device/emulator"
-adb shell mkdir -p ${REMOTE_DIR}
-adb push ${BUILD_DIR}/${TEST_BINARY_FILENAME} ${REMOTE_DIR}
+# Build and install the unit test runner app
+pushd ${TEST_RUNNER_DIR}
+    echo "Building test runner app" 
+	./gradlew assembleDebug
+	echo "Installing to device"
+	./gradlew installDebug
+popd
 
-echo "Running test binary"
-adb shell ${REMOTE_DIR}/${TEST_BINARY_FILENAME}
+echo "Starting app - Check your device for test results"
+adb shell am start ${TEST_RUNNER_PACKAGE_NAME}/.MainActivity 
+
+sleep 1
+adb logcat --pid=`adb shell pidof -s ${TEST_RUNNER_PACKAGE_NAME}`

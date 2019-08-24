@@ -23,11 +23,26 @@
 
 namespace oboe {
 
+/**
+ * Convert an array of floats to an array of 16-bit integers.
+ *
+ * @param source the input array.
+ * @param destination the output array.
+ * @param numSamples the number of values to convert.
+ */
 void convertFloatToPcm16(const float *source, int16_t *destination, int32_t numSamples);
+
+/**
+ * Convert an array of 16-bit integers to an array of floats.
+ *
+ * @param source the input array.
+ * @param destination the output array.
+ * @param numSamples the number of values to convert.
+ */
 void convertPcm16ToFloat(const int16_t *source, float *destination, int32_t numSamples);
 
 /**
- * @return the size of a sample of the given format in bytes or OBOE_ERROR_ILLEGAL_ARGUMENT
+ * @return the size of a sample of the given format in bytes or 0 if format is invalid
  */
 int32_t convertFormatToSizeInBytes(AudioFormat format);
 
@@ -37,11 +52,11 @@ int32_t convertFormatToSizeInBytes(AudioFormat format);
  * This is intended for developers to use when debugging.
  * It is not for displaying to users.
  *
- * @param enum value @see common/Utilities.cpp for concrete implementations
- * @return text representation of an Oboe enum value.
+ * @param input object to convert from. @see common/Utilities.cpp for concrete implementations
+ * @return text representation of an Oboe enum value. There is no need to call free on this.
  */
 template <typename FromType>
-const char * convertToText(FromType);
+const char * convertToText(FromType input);
 
 /**
  * Return the version of the SDK that is currently running.

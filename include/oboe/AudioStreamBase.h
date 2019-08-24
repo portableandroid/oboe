@@ -24,13 +24,8 @@
 namespace oboe {
 
 /**
- * Base class containing parameters for Oboe streams and builders.
- *
- * OboeStreamBuilder can return OBOE_UNSPECIFIED or the requested value.
- *
- * OboeStream will generally return the actual final value, but getFramesPerCallback()
- * can be unspecified even for a stream.
- */
+ * Base class containing parameters for audio streams and builders.
+ **/
 class AudioStreamBase {
 public:
 
@@ -39,14 +34,21 @@ public:
     virtual ~AudioStreamBase() = default;
 
     // This class only contains primitives so we can use default constructor and copy methods.
+
+    /**
+     * Default copy constructor
+     */
     AudioStreamBase(const AudioStreamBase&) = default;
 
+    /**
+     * Default assignment operator
+     */
     AudioStreamBase& operator=(const AudioStreamBase&) = default;
 
     /**
-     * @return number of channels, for example 2 for stereo
+     * @return number of channels, for example 2 for stereo, or kUnspecified
      */
-    int getChannelCount() const { return mChannelCount; }
+    int32_t getChannelCount() const { return mChannelCount; }
 
     /**
      * @return Direction::Input or Direction::Output
@@ -54,58 +56,116 @@ public:
     Direction getDirection() const { return mDirection; }
 
     /**
-     * @return sample rate for the stream
+     * @return sample rate for the stream or kUnspecified
      */
     int32_t getSampleRate() const { return mSampleRate; }
 
     /**
-     * @return framesPerCallback or OBOE_UNSPECIFIED
+     * @return the number of frames in each callback or kUnspecified.
      */
-    int getFramesPerCallback() const { return mFramesPerCallback; }
+    int32_t getFramesPerCallback() const { return mFramesPerCallback; }
 
     /**
-     * @return OBOE_AUDIO_FORMAT_PCM_FLOAT, OBOE_AUDIO_FORMAT_PCM_I16
-     *         or OBOE_AUDIO_FORMAT_UNSPECIFIED
+     * @return the audio sample format (e.g. Float or I16)
      */
     AudioFormat getFormat() const { return mFormat; }
 
     /**
      * Query the maximum number of frames that can be filled without blocking.
+     * If the stream has been closed the last known value will be returned.
      *
-     * @return buffer size or a negative error.
+     * @return buffer size
      */
-    virtual int32_t getBufferSizeInFrames() const {
-        // By default assume the effective size is the same as capacity.
-        return getBufferCapacityInFrames();
-    }
+    virtual int32_t getBufferSizeInFrames() { return mBufferSizeInFrames; }
 
     /**
-     * @return capacityInFrames or OBOE_UNSPECIFIED
+     * @return capacityInFrames or kUnspecified
      */
     virtual int32_t getBufferCapacityInFrames() const { return mBufferCapacityInFrames; }
 
+    /**
+     * @return the sharing mode of the stream.
+     */
     SharingMode getSharingMode() const { return mSharingMode; }
 
+    /**
+     * @return the performance mode of the stream.
+     */
     PerformanceMode getPerformanceMode() const { return mPerformanceMode; }
 
+    /**
+     * @return the device ID of the stream.
+     */
     int32_t getDeviceId() const { return mDeviceId; }
 
+    /**
+     * @return the callback object for this stream, if set.
+     */
     AudioStreamCallback* getCallback() const {
         return mStreamCallback;
     }
 
-protected:
-    AudioStreamCallback            *mStreamCallback = nullptr;
-    int32_t                         mFramesPerCallback = kUnspecified;
-    int32_t                         mChannelCount = kUnspecified;
-    int32_t                         mSampleRate = kUnspecified;
-    int32_t                         mDeviceId = kUnspecified;
-    int32_t                         mBufferCapacityInFrames = kUnspecified;
+    /**
+     * @return the usage for this stream.
+     */
+    Usage getUsage() const { return mUsage; }
 
+    /**
+     * @return the stream's content type.
+     */
+    ContentType getContentType() const { return mContentType; }
+
+    /**
+     * @return the stream's input preset.
+     */
+    InputPreset getInputPreset() const { return mInputPreset; }
+
+    /**
+     * @return the stream's session ID allocation strategy (None or Allocate).
+     */
+    SessionId getSessionId() const { return mSessionId; }
+
+protected:
+
+    /** The callback which will be fired when new data is ready to be read/written **/
+    AudioStreamCallback            *mStreamCallback = nullptr;
+    /** Number of audio frames which will be requested in each callback */
+    int32_t                         mFramesPerCallback = kUnspecified;
+    /** Stream channel count */
+    int32_t                         mChannelCount = kUnspecified;
+    /** Stream sample rate */
+    int32_t                         mSampleRate = kUnspecified;
+    /** Stream audio device ID */
+    int32_t                         mDeviceId = kUnspecified;
+    /** Stream buffer capacity specified as a number of audio frames */
+    int32_t                         mBufferCapacityInFrames = kUnspecified;
+    /** Stream buffer size specified as a number of audio frames */
+    int32_t                         mBufferSizeInFrames = kUnspecified;
+    /**
+     * Number of frames which will be copied to/from the audio device in a single read/write
+     * operation
+     */
+    int32_t                         mFramesPerBurst = kUnspecified;
+
+    /** Stream sharing mode */
     SharingMode                     mSharingMode = SharingMode::Shared;
+    /** Format of audio frames */
     AudioFormat                     mFormat = AudioFormat::Unspecified;
+    /** Stream direction */
     Direction                       mDirection = Direction::Output;
+    /** Stream performance mode */
     PerformanceMode                 mPerformanceMode = PerformanceMode::None;
+
+    /** Stream usage. Only active on Android 28+ */
+    Usage                           mUsage = Usage::Media;
+    /** Stream content type. Only active on Android 28+ */
+    ContentType                     mContentType = ContentType::Music;
+    /** Stream input preset. Only active on Android 28+
+     * TODO InputPreset::Unspecified should be considered as a possible default alternative.
+    */
+    InputPreset                     mInputPreset = InputPreset::VoiceRecognition;
+    /** Stream session ID allocation strategy. Only active on Android 28+ */
+    SessionId                       mSessionId = SessionId::None;
 };
 
 } // namespace oboe

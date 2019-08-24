@@ -32,29 +32,39 @@ public:
 
     FifoBuffer(uint32_t   bytesPerFrame,
                uint32_t   capacityInFrames,
-               int64_t * readCounterAddress,
-               int64_t * writeCounterAddress,
-               uint8_t * dataStorageAddress);
+               std::atomic<uint64_t>   *readCounterAddress,
+               std::atomic<uint64_t>   *writeCounterAddress,
+               uint8_t   *dataStorageAddress);
 
     ~FifoBuffer();
 
     int32_t convertFramesToBytes(int32_t frames);
 
+    /**
+     * Read framesToRead or, if not enough, then read as many as are available.
+     * @param destination
+     * @param framesToRead number of frames requested
+     * @return number of frames actually read
+     */
     int32_t read(void *destination, int32_t framesToRead);
 
     int32_t write(const void *source, int32_t framesToWrite);
 
-    uint32_t getThresholdFrames() const;
-
-    void setThresholdFrames(uint32_t threshold);
-
     uint32_t getBufferCapacityInFrames() const;
 
-    int32_t readNow(void *buffer, int32_t numFrames);
+    /**
+     * Calls read(). If all of the frames cannot be read then the remainder of the buffer
+     * is set to zero.
+     *
+     * @param destination
+     * @param framesToRead number of frames requested
+     * @return number of frames actually read
+     */
+    int32_t readNow(void *destination, int32_t numFrames);
 
-    uint32_t getUnderrunCount() const { return mUnderrunCount; }
-
-    FifoControllerBase *getFifoControllerBase() { return mFifo; }
+    uint32_t getFullFramesAvailable() {
+        return mFifo->getFullFramesAvailable();
+    }
 
     uint32_t getBytesPerFrame() const {
         return mBytesPerFrame;
@@ -66,7 +76,6 @@ public:
 
     void setReadCounter(uint64_t n) {
         mFifo->setReadCounter(n);
-//        LOGD("FifoBuffer: setReadCounter(%d)", (int) n);
     }
 
     uint64_t getWriteCounter() {
@@ -74,18 +83,15 @@ public:
     }
     void setWriteCounter(uint64_t n) {
         mFifo->setWriteCounter(n);
-//        LOGD("FifoBuffer: setWriteCounter(%d)", (int) n);
     }
 
 private:
-    uint32_t mFrameCapacity;
     uint32_t mBytesPerFrame;
     uint8_t* mStorage;
     bool     mStorageOwned; // did this object allocate the storage?
-    FifoControllerBase *mFifo;
+    std::unique_ptr<FifoControllerBase> mFifo;
     uint64_t mFramesReadCount;
     uint64_t mFramesUnderrunCount;
-    uint32_t mUnderrunCount; // need? just use frames
 };
 
 } // namespace oboe

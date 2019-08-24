@@ -5,12 +5,14 @@ These samples demonstrate how to use the Oboe library:
 1. [hello-oboe](hello-oboe): creates an output (playback) stream and plays a
 sine wave when you tap the screen
 1. [RhythmGame](RhythmGame): A simple rhythm game where you copy the clap patterns you hear by tapping on the screen
+1. [MegaDrone](MegaDrone): A one hundred oscillator synthesizer, demonstrates low latency and CPU performance
+1. [LiveEffect](LiveEffect): loops audio from input stream to output stream to demonstrate duplex capability
 
 Pre-requisites
 -------------
 * Android device or emulator running API 16 (Jelly Bean) or above
 * [Android SDK 26](https://developer.android.com/about/versions/oreo/android-8.0-migration.html#ptb)
-* [NDK r16](https://developer.android.com/ndk/downloads/index.html) or above
+* [NDK r17](https://developer.android.com/ndk/downloads/index.html) or above
 * [Android Studio 2.3.0+](https://developer.android.com/studio/index.html)
 
 Getting Started
@@ -24,9 +26,9 @@ Getting Started
 
 Support
 -------
-If you've found an error in these samples, please [file an issue](https://github.com/googlesamples/android-audio-high-performance/issues/new).
+If you've found an error in these samples, please [file an issue](https://github.com/google/oboe/issues/new).
 
-Patches are encouraged, and may be submitted by [forking this project](https://github.com/googlesamples/android-audio-high-performance/fork) and
+Patches are encouraged, and may be submitted by [forking this project](https://github.com/google/oboe/fork) and
 submitting a pull request through GitHub. Please see [CONTRIBUTING.md](../CONTRIBUTING.md) for more details.
 
 - [Stack Overflow](http://stackoverflow.com/questions/tagged/android-ndk)

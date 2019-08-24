@@ -16,6 +16,7 @@
 
 #include <sys/types.h>
 #include <pthread.h>
+#include <thread>
 #include <oboe/AudioStream.h>
 #include "OboeDebug.h"
 #include <oboe/Utilities.h>
@@ -29,15 +30,22 @@ AudioStream::AudioStream(const AudioStreamBuilder &builder)
         : AudioStreamBase(builder) {
 }
 
-Result AudioStream::open() {
-    // TODO validate parameters or let underlying API validate them?
+Result AudioStream::close() {
+    // Update local counters so they can be read after the close.
+    updateFramesWritten();
+    updateFramesRead();
     return Result::OK;
 }
 
-DataCallbackResult AudioStream::fireCallback(void *audioData, int32_t numFrames) {
+DataCallbackResult AudioStream::fireDataCallback(void *audioData, int32_t numFrames) {
+    if (!isDataCallbackEnabled()) {
+        LOGW("AudioStream::%s() called with data callback disabled!", __func__);
+        return DataCallbackResult::Stop; // We should not be getting called any more.
+    }
+
     int scheduler = sched_getscheduler(0) & ~SCHED_RESET_ON_FORK; // for current thread
     if (scheduler != mPreviousScheduler) {
-        LOGD("AudioStream::fireCallback() scheduler = %s",
+        LOGD("AudioStream::%s() scheduler = %s", __func__,
              ((scheduler == SCHED_FIFO) ? "SCHED_FIFO" :
              ((scheduler == SCHED_OTHER) ? "SCHED_OTHER" :
              ((scheduler == SCHED_RR) ? "SCHED_RR" : "UNKNOWN")))
@@ -50,12 +58,10 @@ DataCallbackResult AudioStream::fireCallback(void *audioData, int32_t numFrames)
         result = onDefaultCallback(audioData, numFrames);
     } else {
         result = mStreamCallback->onAudioReady(this, audioData, numFrames);
-        if (getDirection() == Direction::Input) {
-            incrementFramesRead(numFrames);
-        } else {
-            incrementFramesWritten(numFrames);
-        }
     }
+    // On Oreo, we might get called after returning stop.
+    // So block there here.
+    setDataCallbackEnabled(result == DataCallbackResult::Continue);
 
     return result;
 }
@@ -64,14 +70,26 @@ Result AudioStream::waitForStateTransition(StreamState startingState,
                                            StreamState endingState,
                                            int64_t timeoutNanoseconds)
 {
-    StreamState state = getState();
+    StreamState state;
+    {
+        std::lock_guard<std::mutex> lock(mLock);
+        state = getState();
+        if (state == StreamState::Closed) {
+            return Result::ErrorClosed;
+        } else if (state == StreamState::Disconnected) {
+            return Result::ErrorDisconnected;
+        }
+    }
+
     StreamState nextState = state;
+    // TODO Should this be a while()?!
     if (state == startingState && state != endingState) {
         Result result = waitForStateChange(state, &nextState, timeoutNanoseconds);
         if (result != Result::OK) {
             return result;
         }
     }
+
     if (nextState != endingState) {
         return Result::ErrorInvalidState;
     } else {
@@ -83,6 +101,7 @@ Result AudioStream::start(int64_t timeoutNanoseconds)
 {
     Result result = requestStart();
     if (result != Result::OK) return result;
+    if (timeoutNanoseconds <= 0) return result;
     return waitForStateTransition(StreamState::Starting,
                                   StreamState::Started, timeoutNanoseconds);
 }
@@ -91,6 +110,7 @@ Result AudioStream::pause(int64_t timeoutNanoseconds)
 {
     Result result = requestPause();
     if (result != Result::OK) return result;
+    if (timeoutNanoseconds <= 0) return result;
     return waitForStateTransition(StreamState::Pausing,
                                   StreamState::Paused, timeoutNanoseconds);
 }
@@ -99,6 +119,7 @@ Result AudioStream::flush(int64_t timeoutNanoseconds)
 {
     Result result = requestFlush();
     if (result != Result::OK) return result;
+    if (timeoutNanoseconds <= 0) return result;
     return waitForStateTransition(StreamState::Flushing,
                                   StreamState::Flushed, timeoutNanoseconds);
 }
@@ -107,17 +128,37 @@ Result AudioStream::stop(int64_t timeoutNanoseconds)
 {
     Result result = requestStop();
     if (result != Result::OK) return result;
+    if (timeoutNanoseconds <= 0) return result;
     return waitForStateTransition(StreamState::Stopping,
                                   StreamState::Stopped, timeoutNanoseconds);
 }
 
-bool AudioStream::isPlaying() {
-    StreamState state = getState();
-    return state == StreamState::Starting || state == StreamState::Started;
-}
-
 int32_t AudioStream::getBytesPerSample() const {
     return convertFormatToSizeInBytes(mFormat);
+}
+
+int64_t AudioStream::getFramesRead() {
+    updateFramesRead();
+    return mFramesRead;
+}
+
+int64_t AudioStream::getFramesWritten() {
+    updateFramesWritten();
+    return mFramesWritten;
+}
+
+static void oboe_stop_thread_proc(AudioStream *oboeStream) {
+    LOGD("%s() called ----)))))", __func__);
+    if (oboeStream != nullptr) {
+        oboeStream->requestStop();
+    }
+    LOGD("%s() returning (((((----", __func__);
+}
+
+void AudioStream::launchStopThread() {
+    // Stop this stream on a separate thread
+    std::thread t(oboe_stop_thread_proc, this);
+    t.detach();
 }
 
 } // namespace oboe

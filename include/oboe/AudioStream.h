@@ -17,10 +17,12 @@
 #ifndef OBOE_STREAM_H_
 #define OBOE_STREAM_H_
 
+#include <atomic>
 #include <cstdint>
 #include <ctime>
+#include <mutex>
 #include "oboe/Definitions.h"
-#include "oboe/ErrorOrValue.h"
+#include "oboe/ResultWithValue.h"
 #include "oboe/AudioStreamBuilder.h"
 #include "oboe/AudioStreamBase.h"
 
@@ -28,6 +30,12 @@
 
 namespace oboe {
 
+/**
+ * The default number of nanoseconds to wait for when performing state change operations on the
+ * stream, such as `start` and `stop`.
+ *
+ * @see oboe::AudioStream::start
+ */
 constexpr int64_t kDefaultTimeoutNanos = (2000 * kNanosPerMillisecond);
 
 /**
@@ -37,6 +45,12 @@ class AudioStream : public AudioStreamBase {
 public:
 
     AudioStream() {}
+
+    /**
+     * Construct an `AudioStream` using the given `AudioStreamBuilder`
+     *
+     * @param builder containing all the stream's attributes
+     */
     explicit AudioStream(const AudioStreamBuilder &builder);
 
     virtual ~AudioStream() = default;
@@ -49,27 +63,65 @@ public:
      *
      * @return
      */
-    virtual Result open();
+    virtual Result open() {
+        return Result::OK; // Called by subclasses. Might do more in the future.
+    }
 
     /**
      * Close the stream and deallocate any resources from the open() call.
      */
-    virtual Result close() = 0;
+    virtual Result close();
 
-    /*
-     * These are synchronous and will block until the operation is complete.
+    /**
+     * Start the stream. This will block until the stream has been started, an error occurs
+     * or `timeoutNanoseconds` has been reached.
      */
     virtual Result start(int64_t timeoutNanoseconds = kDefaultTimeoutNanos);
+
+    /**
+     * Pause the stream. This will block until the stream has been paused, an error occurs
+     * or `timeoutNanoseconds` has been reached.
+     */
     virtual Result pause(int64_t timeoutNanoseconds = kDefaultTimeoutNanos);
+
+    /**
+     * Flush the stream. This will block until the stream has been flushed, an error occurs
+     * or `timeoutNanoseconds` has been reached.
+     */
     virtual Result flush(int64_t timeoutNanoseconds = kDefaultTimeoutNanos);
+
+    /**
+     * Stop the stream. This will block until the stream has been stopped, an error occurs
+     * or `timeoutNanoseconds` has been reached.
+     */
     virtual Result stop(int64_t timeoutNanoseconds = kDefaultTimeoutNanos);
 
     /* Asynchronous requests.
      * Use waitForStateChange() if you need to wait for completion.
      */
+
+    /**
+     * Start the stream asynchronously. Returns immediately (does not block). Equivalent to calling
+     * `start(0)`.
+     */
     virtual Result requestStart() = 0;
+
+    /**
+     * Pause the stream asynchronously. Returns immediately (does not block). Equivalent to calling
+     * `pause(0)`.
+     */
     virtual Result requestPause() = 0;
+
+    /**
+     * Flush the stream asynchronously. Returns immediately (does not block). Equivalent to calling
+     * `flush(0)`.
+     */
     virtual Result requestFlush() = 0;
+
+    /**
+     * Stop the stream asynchronously. Returns immediately (does not block). Equivalent to calling
+     * `stop(0)`.
+     */
     virtual Result requestStop() = 0;
 
     /**
@@ -77,7 +129,7 @@ public:
      *
      * @return state or a negative error.
      */
-    virtual StreamState getState() = 0;
+    virtual StreamState getState() const = 0;
 
     /**
      * Wait until the stream's current state no longer matches the input state.
@@ -85,7 +137,7 @@ public:
      * changing between calls.
      *
      * Note that generally applications do not need to call this. It is considered
-     * an advanced technique.
+     * an advanced technique and is mostly used for testing.
      *
      * <pre><code>
      * int64_t timeoutNanos = 500 * kNanosPerMillisecond; // arbitrary 1/2 second
@@ -98,7 +150,10 @@ public:
      * }
      * </code></pre>
      *
-     * @param inputState The state we want to avoid.
+     * If the state does not change within the timeout period then it will
+     * return ErrorTimeout. This is true even if timeoutNanoseconds is zero.
+     *
+     * @param inputState The state we want to change away from.
      * @param nextState Pointer to a variable that will be set to the new state.
      * @param timeoutNanoseconds The maximum time to wait in nanoseconds.
      * @return Result::OK or a Result::Error.
@@ -116,9 +171,10 @@ public:
     * This cannot be set higher than getBufferCapacity().
     *
     * @param requestedFrames requested number of frames that can be filled without blocking
-    * @return resulting buffer size in frames or a Result::Error
+    * @return the resulting buffer size in frames (obtained using value()) or an error (obtained
+    * using error())
     */
-    virtual Result setBufferSizeInFrames(int32_t requestedFrames) {
+    virtual ResultWithValue<int32_t> setBufferSizeInFrames(int32_t /* requestedFrames  */) {
         return Result::ErrorUnimplemented;
     }
 
@@ -131,11 +187,17 @@ public:
      *
      * An underrun or overrun can cause an audible "pop" or "glitch".
      *
-     * @return the count or negative error.
+     * @return a result which is either Result::OK with the xRun count as the value, or a
+     * Result::Error* code
      */
-    virtual int32_t getXRunCount() const {
-        return static_cast<int32_t>(Result::ErrorUnimplemented);
+    virtual ResultWithValue<int32_t> getXRunCount() const {
+        return ResultWithValue<int32_t>(Result::ErrorUnimplemented);
     }
+
+    /**
+     * @return true if XRun counts are supported on the stream
+     */
+    virtual bool isXRunCountSupported() const = 0;
 
     /**
      * Query the number of frames that are read or written by the endpoint at one time.
@@ -144,19 +206,38 @@ public:
      */
     virtual int32_t getFramesPerBurst() = 0;
 
-    bool isPlaying();
-
+    /**
+     * Get the number of bytes in each audio frame. This is calculated using the channel count
+     * and the sample format. For example, a 2 channel floating point stream will have
+     * 2 * 4 = 8 bytes per frame.
+     *
+     * @return number of bytes in each audio frame.
+     */
     int32_t getBytesPerFrame() const { return mChannelCount * getBytesPerSample(); }
 
+    /**
+     * Get the number of bytes per sample. This is calculated using the sample format. For example,
+     * a stream using 16-bit integer samples will have 2 bytes per sample.
+     *
+     * @return the number of bytes per sample.
+     */
     int32_t getBytesPerSample() const;
 
     /**
+     * The number of audio frames written into the stream.
      * This monotonic counter will never get reset.
+     *
      * @return the number of frames written so far
      */
-    virtual int64_t getFramesWritten() const { return mFramesWritten; }
+    virtual int64_t getFramesWritten();
 
-    virtual int64_t getFramesRead() const { return mFramesRead; }
+    /**
+     * The number of audio frames read from the stream.
+     * This monotonic counter will never get reset.
+     *
+     * @return the number of frames read so far
+     */
+    virtual int64_t getFramesRead();
 
     /**
      * Calculate the latency of a stream based on getTimestamp().
@@ -178,57 +259,111 @@ public:
      * The latency of an OUTPUT stream is generally higher than the INPUT latency
      * because an app generally tries to keep the OUTPUT buffer full and the INPUT buffer empty.
      *
-     * @return The latency in milliseconds and Result::OK, or a negative error.
+     * @return a ResultWithValue which has a result of Result::OK and a value containing the latency
+     * in milliseconds, or a result of Result::Error*.
      */
-    virtual ErrorOrValue<double> calculateLatencyMillis() {
-        return ErrorOrValue<double>(Result::ErrorUnimplemented);
+    virtual ResultWithValue<double> calculateLatencyMillis() {
+        return ResultWithValue<double>(Result::ErrorUnimplemented);
     }
 
-    virtual Result getTimestamp(clockid_t clockId,
-                                int64_t *framePosition,
-                                int64_t *timeNanoseconds) {
+    /**
+     * Get the estimated time that the frame at `framePosition` entered or left the audio processing
+     * pipeline.
+     *
+     * This can be used to coordinate events and interactions with the external environment, and to
+     * estimate the latency of an audio stream. An example of usage can be found in the hello-oboe
+     * sample (search for "calculateCurrentOutputLatencyMillis").
+     *
+     * The time is based on the implementation's best effort, using whatever knowledge is available
+     * to the system, but cannot account for any delay unknown to the implementation.
+     *
+     * @deprecated since 1.0, use AudioStream::getTimestamp(clockid_t clockId) instead, which
+     * returns ResultWithValue
+     * @param clockId the type of clock to use e.g. CLOCK_MONOTONIC
+     * @param framePosition the frame number to query
+     * @param timeNanoseconds an output parameter which will contain the presentation timestamp
+     */
+    virtual Result getTimestamp(clockid_t /* clockId  */,
+                                int64_t* /* framePosition */,
+                                int64_t* /* timeNanoseconds */) {
+        return Result::ErrorUnimplemented;
+    }
+
+    /**
+     * Get the estimated time that the frame at `framePosition` entered or left the audio processing
+     * pipeline.
+     *
+     * This can be used to coordinate events and interactions with the external environment, and to
+     * estimate the latency of an audio stream. An example of usage can be found in the hello-oboe
+     * sample (search for "calculateCurrentOutputLatencyMillis").
+     *
+     * The time is based on the implementation's best effort, using whatever knowledge is available
+     * to the system, but cannot account for any delay unknown to the implementation.
+     *
+     * @param clockId the type of clock to use e.g. CLOCK_MONOTONIC
+     * @return a FrameTimestamp containing the position and time at which a particular audio frame
+     * entered or left the audio processing pipeline, or an error if the operation failed.
+     */
+	virtual ResultWithValue<FrameTimestamp> getTimestamp(clockid_t /* clockId */){
         return Result::ErrorUnimplemented;
     }
 
     // ============== I/O ===========================
     /**
-     * A high level write that will wait until the write is complete or it runs out of time.
-     * If timeoutNanoseconds is zero then this call will not wait.
+     * Write data from the supplied buffer into the stream. This method will block until the write
+     * is complete or it runs out of time.
      *
-     * @param stream A stream created using OboeStream_Open().
+     * If `timeoutNanoseconds` is zero then this call will not wait.
+     *
      * @param buffer The address of the first sample.
      * @param numFrames Number of frames to write. Only complete frames will be written.
      * @param timeoutNanoseconds Maximum number of nanoseconds to wait for completion.
-     * @return The number of frames actually written and Result::OK, or a negative error.
+     * @return a ResultWithValue which has a result of Result::OK and a value containing the number
+     * of frames actually written, or result of Result::Error*.
      */
-    virtual ErrorOrValue<int32_t> write(const void *buffer,
-                             int32_t numFrames,
-                             int64_t timeoutNanoseconds) {
-        return ErrorOrValue<int32_t>(Result::ErrorUnimplemented);
-    }
-
-    virtual ErrorOrValue<int32_t> read(void *buffer,
-                            int32_t numFrames,
-                            int64_t timeoutNanoseconds) {
-        return ErrorOrValue<int32_t>(Result::ErrorUnimplemented);
+    virtual ResultWithValue<int32_t> write(const void* /* buffer */,
+                             int32_t /* numFrames */,
+                             int64_t /* timeoutNanoseconds */ ) {
+        return ResultWithValue<int32_t>(Result::ErrorUnimplemented);
     }
 
     /**
+     * Read data into the supplied buffer from the stream. This method will block until the read
+     * is complete or it runs out of time.
      *
-     * @return the API that this stream uses
+     * If `timeoutNanoseconds` is zero then this call will not wait.
+     *
+     * @param buffer The address of the first sample.
+     * @param numFrames Number of frames to read. Only complete frames will be read.
+     * @param timeoutNanoseconds Maximum number of nanoseconds to wait for completion.
+     * @return a ResultWithValue which has a result of Result::OK and a value containing the number
+     * of frames actually read, or result of Result::Error*.
+     */
+    virtual ResultWithValue<int32_t> read(void* /* buffer */,
+                            int32_t /* numFrames */,
+                            int64_t /* timeoutNanoseconds */) {
+        return ResultWithValue<int32_t>(Result::ErrorUnimplemented);
+    }
+
+    /**
+     * Get the underlying audio API which the stream uses.
+     *
+     * @return the API that this stream uses.
      */
     virtual AudioApi getAudioApi() const = 0;
 
     /**
-     * @return true if this stream is implemented using the AAudio API
+     * Returns true if the underlying audio API is AAudio.
+     *
+     * @return true if this stream is implemented using the AAudio API.
      */
     bool usesAAudio() const {
         return getAudioApi() == AudioApi::AAudio;
     }
 
     /**
-     * Do not use this for production. This is only for debugging.
-     * If you need to call this method then something is wrong.
+     * Only for debugging. Do not use in production.
+     * If you need to call this method something is wrong.
      * If you think you need it for production then please let us know
      * so we can modify Oboe so that you don't need this.
      *
@@ -238,13 +373,24 @@ public:
         return nullptr;
     }
 
+    /**
+     * Launch a thread that will stop the stream.
+     */
+    void launchStopThread();
+
 protected:
 
-    virtual int64_t incrementFramesWritten(int32_t frames) {
-        return mFramesWritten += frames;
-    }
-    virtual int64_t incrementFramesRead(int32_t frames) {
-        return mFramesRead += frames;
+    /**
+     * This is used to detect more than one error callback from a stream.
+     * These were bugs in some versions of Android that caused multiple error callbacks.
+     * Internal bug b/63087953
+     *
+     * Calling this sets an atomic<bool> true and returns the previous value.
+     *
+     * @return false on first call, true on subsequent calls
+     */
+    bool wasErrorCallbackCalled() {
+        return mErrorCallbackCalled.exchange(true);
     }
 
     /**
@@ -264,27 +410,83 @@ protected:
      * @param numFrames
      * @return result
      */
-    virtual DataCallbackResult onDefaultCallback(void *audioData, int numFrames) {
+    virtual DataCallbackResult onDefaultCallback(void* /* audioData  */, int /* numFrames */) {
         return DataCallbackResult::Stop;
     }
 
-    DataCallbackResult fireCallback(void *audioData, int numFrames);
+    /**
+     * Override this to provide your own behaviour for the audio callback
+     *
+     * @param audioData container array which audio frames will be written into or read from
+     * @param numFrames number of frames which were read/written
+     * @return the result of the callback: stop or continue
+     *
+     */
+    DataCallbackResult fireDataCallback(void *audioData, int numFrames);
 
-    virtual void setNativeFormat(AudioFormat format) {
-        mNativeFormat = format;
+    /**
+     * Update mFramesWritten.
+     */
+    virtual void updateFramesWritten() = 0;
+
+    /**
+     * Update mFramesRead.
+     */
+    virtual void updateFramesRead() = 0;
+
+    /**
+     * @return true if callbacks may be called
+     */
+    bool isDataCallbackEnabled() {
+        return mDataCallbackEnabled;
     }
 
-    // TODO: make private
-    // These do not change after open.
-    AudioFormat mNativeFormat = AudioFormat::Invalid;
+    /**
+     * This can be set false internally to prevent callbacks
+     * after DataCallbackResult::Stop has been returned.
+     */
+    void setDataCallbackEnabled(bool enabled) {
+        mDataCallbackEnabled = enabled;
+    }
+
+    /**
+     * Number of frames which have been written into the stream
+     *
+     * This is signed integer to match the counters in AAudio.
+     * At audio rates, the counter will overflow in about six million years.
+     */
+    std::atomic<int64_t> mFramesWritten{};
+
+    /**
+     * Number of frames which have been read from the stream.
+     *
+     * This is signed integer to match the counters in AAudio.
+     * At audio rates, the counter will overflow in about six million years.
+     */
+    std::atomic<int64_t> mFramesRead{};
+
+    std::mutex           mLock; // for synchronizing start/stop/close
 
 private:
-    // TODO these should be atomic like in AAudio
-    int64_t              mFramesWritten = 0;
-    int64_t              mFramesRead = 0;
     int                  mPreviousScheduler = -1;
+
+    std::atomic<bool>    mDataCallbackEnabled{false};
+    std::atomic<bool>    mErrorCallbackCalled{false};
+
 };
 
+/**
+ * This struct is a stateless functor which closes a audiostream prior to its deletion.
+ * This means it can be used to safely delete a smart pointer referring to an open stream.
+ */
+    struct StreamDeleterFunctor {
+        void operator()(AudioStream  *audioStream) {
+            if (audioStream) {
+                audioStream->close();
+            }
+            delete audioStream;
+        }
+    };
 } // namespace oboe
 
 #endif /* OBOE_STREAM_H_ */

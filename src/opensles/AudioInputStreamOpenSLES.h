@@ -45,21 +45,17 @@ public:
     Result requestFlush() override;
     Result requestStop() override;
 
-    Result waitForStateChange(StreamState currentState,
-                              StreamState *nextState,
-                              int64_t timeoutNanoseconds) override;
-
-    int chanCountToChanMask(int chanCount);
-
-    int64_t getFramesWritten() const override;
-
 protected:
 
     Result updateServiceFrameCounter() override;
 
+    void updateFramesWritten() override;
+
 private:
 
-    Result setRecordState(SLuint32 newState);
+    SLuint32 channelCountToChannelMask(int chanCount) const;
+
+    Result setRecordState_l(SLuint32 newState);
 
     SLRecordItf mRecordInterface = nullptr;
 };

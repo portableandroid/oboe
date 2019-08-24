@@ -14,18 +14,25 @@
  * limitations under the License.
  */
 
-#include <assert.h>
+#include <cassert>
 #include <stdint.h>
 #include <stdlib.h>
 
 #include "aaudio/AAudioLoader.h"
 #include "aaudio/AudioStreamAAudio.h"
+#include "common/AudioClock.h"
 #include "common/OboeDebug.h"
 #include "oboe/Utilities.h"
 
 #ifdef __ANDROID__
 #include <sys/system_properties.h>
 #endif
+
+#ifndef OBOE_FIX_FORCE_STARTING_TO_STARTED
+// Workaround state problems in AAudio
+// TODO Which versions does this occur in? Verify fixed in Q.
+#define OBOE_FIX_FORCE_STARTING_TO_STARTED 1
+#endif // OBOE_FIX_FORCE_STARTING_TO_STARTED
 
 using namespace oboe;
 AAudioLoader *AudioStreamAAudio::mLibLoader = nullptr;
@@ -37,35 +44,32 @@ static aaudio_data_callback_result_t oboe_aaudio_data_callback_proc(
         void *audioData,
         int32_t numFrames) {
 
-    AudioStreamAAudio *oboeStream = (AudioStreamAAudio *)userData;
-    if (oboeStream != NULL) {
+    AudioStreamAAudio *oboeStream = reinterpret_cast<AudioStreamAAudio*>(userData);
+    if (oboeStream != nullptr) {
         return static_cast<aaudio_data_callback_result_t>(
                 oboeStream->callOnAudioReady(stream, audioData, numFrames));
+
     } else {
         return static_cast<aaudio_data_callback_result_t>(DataCallbackResult::Stop);
     }
 }
 
+// This runs in its own thread.
+// Only one of these threads will be launched from internalErrorCallback().
+// It calls app error callbacks from a static function in case the stream gets deleted.
 static void oboe_aaudio_error_thread_proc(AudioStreamAAudio *oboeStream,
-                                          AAudioStream *stream,
                                           Result error) {
-    if (oboeStream != NULL) {
-        oboeStream->onErrorInThread(stream, error);
+    LOGD("%s() - entering >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>", __func__);
+    oboeStream->requestStop();
+    if (oboeStream->getCallback() != nullptr) {
+        oboeStream->getCallback()->onErrorBeforeClose(oboeStream, error);
     }
-}
-
-// 'C' wrapper for the error callback method
-static void oboe_aaudio_error_callback_proc(
-        AAudioStream *stream,
-        void *userData,
-        aaudio_result_t error) {
-
-    AudioStreamAAudio *oboeStream = (AudioStreamAAudio *)userData;
-    if (oboeStream != NULL) {
-        // Handle error on a separate thread
-        std::thread t(oboe_aaudio_error_thread_proc, oboeStream, stream, static_cast<Result>(error));
-        t.detach();
+    oboeStream->close();
+    if (oboeStream->getCallback() != nullptr) {
+        // Warning, oboeStream may get deleted by this callback.
+        oboeStream->getCallback()->onErrorAfterClose(oboeStream, error);
     }
+    LOGD("%s() - exiting <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<", __func__);
 }
 
 namespace oboe {
@@ -75,23 +79,38 @@ namespace oboe {
  */
 AudioStreamAAudio::AudioStreamAAudio(const AudioStreamBuilder &builder)
     : AudioStream(builder)
-    , mFloatCallbackBuffer(nullptr)
-    , mShortCallbackBuffer(nullptr)
     , mAAudioStream(nullptr) {
     mCallbackThreadEnabled.store(false);
     LOGD("AudioStreamAAudio() call isSupported()");
     isSupported();
 }
 
-AudioStreamAAudio::~AudioStreamAAudio() {
-    delete[] mFloatCallbackBuffer;
-    delete[] mShortCallbackBuffer;
-}
-
 bool AudioStreamAAudio::isSupported() {
     mLibLoader = AAudioLoader::getInstance();
     int openResult = mLibLoader->open();
     return openResult == 0;
+}
+
+// Static 'C' wrapper for the error callback method.
+// Launch a thread to handle the error.
+// That other thread can safely stop, close and delete the stream.
+void AudioStreamAAudio::internalErrorCallback(
+        AAudioStream *stream,
+        void *userData,
+        aaudio_result_t error) {
+    AudioStreamAAudio *oboeStream = reinterpret_cast<AudioStreamAAudio*>(userData);
+    // These checks should be enough because we assume that the stream close()
+    // will join() any active callback threads and will not allow new callbacks.
+    if (oboeStream->wasErrorCallbackCalled()) { // block extra error callbacks
+        LOGE("%s() multiple error callbacks called!", __func__);
+    } else if (stream != oboeStream->getUnderlyingStream()) {
+        LOGD("%s() stream already closed", __func__); // can happen if there are bugs
+    } else {
+        // Handle error on a separate thread.
+        std::thread t(oboe_aaudio_error_thread_proc, oboeStream,
+                      static_cast<Result>(error));
+        t.detach();
+    }
 }
 
 Result AudioStreamAAudio::open() {
@@ -106,15 +125,30 @@ Result AudioStreamAAudio::open() {
         return result;
     }
 
-    LOGD("AudioStreamAAudio():  AAudio_createStreamBuilder()");
     AAudioStreamBuilder *aaudioBuilder;
     result = static_cast<Result>(mLibLoader->createStreamBuilder(&aaudioBuilder));
     if (result != Result::OK) {
         return result;
     }
 
-    LOGD("AudioStreamAAudio.open() try with deviceId = %d", (int) mDeviceId);
-    mLibLoader->builder_setBufferCapacityInFrames(aaudioBuilder, mBufferCapacityInFrames);
+    // Do not set INPUT capacity below 4096 because that prevents us from getting a FAST track
+    // when using the Legacy data path.
+    // If the app requests > 4096 then we allow it but we are less likely to get LowLatency.
+    // See internal bug b/80308183 for more details.
+    // Fixed in Q but let's still clip the capacity because high input capacity
+    // does not increase latency.
+    int32_t capacity = mBufferCapacityInFrames;
+    constexpr int kCapacityRequiredForFastLegacyTrack = 4096; // matches value in AudioFinger
+    if (mDirection == oboe::Direction::Input
+            && capacity != oboe::Unspecified
+            && capacity < kCapacityRequiredForFastLegacyTrack
+            && mPerformanceMode == oboe::PerformanceMode::LowLatency) {
+        capacity = kCapacityRequiredForFastLegacyTrack;
+        LOGD("AudioStreamAAudio.open() capacity changed from %d to %d for lower latency",
+             static_cast<int>(mBufferCapacityInFrames), capacity);
+    }
+    mLibLoader->builder_setBufferCapacityInFrames(aaudioBuilder, capacity);
+
     mLibLoader->builder_setChannelCount(aaudioBuilder, mChannelCount);
     mLibLoader->builder_setDeviceId(aaudioBuilder, mDeviceId);
     mLibLoader->builder_setDirection(aaudioBuilder, static_cast<aaudio_direction_t>(mDirection));
@@ -125,14 +159,38 @@ Result AudioStreamAAudio::open() {
     mLibLoader->builder_setPerformanceMode(aaudioBuilder,
                                            static_cast<aaudio_performance_mode_t>(mPerformanceMode));
 
+    // These were added in P so we have to check for the function pointer.
+    if (mLibLoader->builder_setUsage != nullptr) {
+        mLibLoader->builder_setUsage(aaudioBuilder,
+                                     static_cast<aaudio_usage_t>(mUsage));
+    }
+
+    if (mLibLoader->builder_setContentType != nullptr) {
+        mLibLoader->builder_setContentType(aaudioBuilder,
+                                           static_cast<aaudio_content_type_t>(mContentType));
+    }
+
+    if (mLibLoader->builder_setInputPreset != nullptr) {
+        mLibLoader->builder_setInputPreset(aaudioBuilder,
+                                           static_cast<aaudio_input_preset_t>(mInputPreset));
+    }
+
+    if (mLibLoader->builder_setSessionId != nullptr) {
+        mLibLoader->builder_setSessionId(aaudioBuilder,
+                                         static_cast<aaudio_session_id_t>(mSessionId));
+    }
+
     // TODO get more parameters from the builder?
 
     if (mStreamCallback != nullptr) {
         mLibLoader->builder_setDataCallback(aaudioBuilder, oboe_aaudio_data_callback_proc, this);
         mLibLoader->builder_setFramesPerDataCallback(aaudioBuilder, getFramesPerCallback());
+        // If the data callback is not being used then the write method will return an error
+        // and the app can stop and close the stream.
+        mLibLoader->builder_setErrorCallback(aaudioBuilder, internalErrorCallback, this);
     }
-    mLibLoader->builder_setErrorCallback(aaudioBuilder, oboe_aaudio_error_callback_proc, this);
 
+    // ============= OPEN THE STREAM ================
     {
         AAudioStream *stream = nullptr;
         result = static_cast<Result>(mLibLoader->builder_openStream(aaudioBuilder, &stream));
@@ -142,23 +200,37 @@ Result AudioStreamAAudio::open() {
         goto error2;
     }
 
-    // Query and cache the values that will not change.
+    // Query and cache the stream properties
     mDeviceId = mLibLoader->stream_getDeviceId(mAAudioStream);
     mChannelCount = mLibLoader->stream_getChannelCount(mAAudioStream);
     mSampleRate = mLibLoader->stream_getSampleRate(mAAudioStream);
-    mNativeFormat = static_cast<AudioFormat>(mLibLoader->stream_getFormat(mAAudioStream));
-    if (mFormat == AudioFormat::Unspecified) {
-        mFormat = mNativeFormat;
-    }
+    mFormat = static_cast<AudioFormat>(mLibLoader->stream_getFormat(mAAudioStream));
     mSharingMode = static_cast<SharingMode>(mLibLoader->stream_getSharingMode(mAAudioStream));
     mPerformanceMode = static_cast<PerformanceMode>(
             mLibLoader->stream_getPerformanceMode(mAAudioStream));
     mBufferCapacityInFrames = mLibLoader->stream_getBufferCapacity(mAAudioStream);
+    mBufferSizeInFrames = mLibLoader->stream_getBufferSize(mAAudioStream);
 
-    LOGD("AudioStreamAAudio.open() app    format = %d", (int) mFormat);
-    LOGD("AudioStreamAAudio.open() native format = %d", (int) mNativeFormat);
-    LOGD("AudioStreamAAudio.open() sample rate   = %d", (int) mSampleRate);
-    LOGD("AudioStreamAAudio.open() capacity      = %d", (int) mBufferCapacityInFrames);
+
+    // These were added in P so we have to check for the function pointer.
+    if (mLibLoader->stream_getUsage != nullptr) {
+        mUsage = static_cast<Usage>(mLibLoader->stream_getUsage(mAAudioStream));
+    }
+    if (mLibLoader->stream_getContentType != nullptr) {
+        mContentType = static_cast<ContentType>(mLibLoader->stream_getContentType(mAAudioStream));
+    }
+    if (mLibLoader->stream_getInputPreset != nullptr) {
+        mInputPreset = static_cast<InputPreset>(mLibLoader->stream_getInputPreset(mAAudioStream));
+    }
+    if (mLibLoader->stream_getSessionId != nullptr) {
+        mSessionId = static_cast<SessionId>(mLibLoader->stream_getSessionId(mAAudioStream));
+    } else {
+        mSessionId = SessionId::None;
+    }
+
+    LOGD("AudioStreamAAudio.open() app    format = %d", static_cast<int>(mFormat));
+    LOGD("AudioStreamAAudio.open() sample rate   = %d", static_cast<int>(mSampleRate));
+    LOGD("AudioStreamAAudio.open() capacity      = %d", static_cast<int>(mBufferCapacityInFrames));
 
 error2:
     mLibLoader->builder_delete(aaudioBuilder);
@@ -168,69 +240,69 @@ error2:
     return result;
 }
 
-Result AudioStreamAAudio::close()
-{
+Result AudioStreamAAudio::close() {
     // The main reason we have this mutex if to prevent a collision between a call
     // by the application to stop a stream at the same time that an onError callback
     // is being executed because of a disconnect. The close will delete the stream,
     // which could otherwise cause the requestStop() to crash.
     std::lock_guard<std::mutex> lock(mLock);
-    Result result = Result::OK;
+
+    AudioStream::close();
+
     // This will delete the AAudio stream object so we need to null out the pointer.
     AAudioStream *stream = mAAudioStream.exchange(nullptr);
     if (stream != nullptr) {
-        result = static_cast<Result>(mLibLoader->stream_close(stream));
+        return static_cast<Result>(mLibLoader->stream_close(stream));
+    } else {
+        return Result::ErrorClosed;
     }
-    return result;
 }
 
 DataCallbackResult AudioStreamAAudio::callOnAudioReady(AAudioStream *stream,
                                                                  void *audioData,
                                                                  int32_t numFrames) {
-    return mStreamCallback->onAudioReady(
-            this,
-            audioData,
-            numFrames);
-}
-
-void AudioStreamAAudio::onErrorInThread(AAudioStream *stream, Result error) {
-    LOGD("onErrorInThread() - entering ===================================");
-    assert(stream == mAAudioStream.load());
-    requestStop();
-    if (mStreamCallback != nullptr) {
-        mStreamCallback->onErrorBeforeClose(this, error);
-    }
-    close();
-    if (mStreamCallback != nullptr) {
-        mStreamCallback->onErrorAfterClose(this, error);
-    }
-    LOGD("onErrorInThread() - exiting ===================================");
-}
-
-Result AudioStreamAAudio::convertApplicationDataToNative(int32_t numFrames) {
-    Result result = Result::ErrorUnimplemented;
-    int32_t numSamples = numFrames * getChannelCount();
-    if (mFormat == AudioFormat::Float) {
-        if (mNativeFormat == AudioFormat::I16) {
-            convertFloatToPcm16(mFloatCallbackBuffer, mShortCallbackBuffer, numSamples);
-            result = Result::OK;
+    DataCallbackResult result = fireDataCallback(audioData, numFrames);
+    if (result == DataCallbackResult::Continue) {
+        return result;
+    } else {
+        if (result == DataCallbackResult::Stop) {
+            LOGE("Oboe callback returned DataCallbackResult::Stop");
+        } else {
+            LOGE("Oboe callback returned unexpected value = %d", result);
         }
-    } else if (mFormat == AudioFormat::I16) {
-        if (mNativeFormat == AudioFormat::Float) {
-            convertPcm16ToFloat(mShortCallbackBuffer, mFloatCallbackBuffer, numSamples);
-            result = Result::OK;
+
+        if (getSdkVersion() <= __ANDROID_API_P__) {
+            launchStopThread();
+            if (isMMapUsed()) {
+                return DataCallbackResult::Stop;
+            } else {
+                // Legacy stream <= API_P cannot be restarted after returning Stop.
+                return DataCallbackResult::Continue;
+            }
+        } else {
+            return DataCallbackResult::Stop; // OK >= API_Q
         }
     }
-    return result;
 }
 
 Result AudioStreamAAudio::requestStart() {
     std::lock_guard<std::mutex> lock(mLock);
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
+        // Avoid state machine errors in O_MR1.
+        if (getSdkVersion() <= __ANDROID_API_O_MR1__) {
+            StreamState state = static_cast<StreamState>(mLibLoader->stream_getState(stream));
+            if (state == StreamState::Starting || state == StreamState::Started) {
+                // WARNING: On P, AAudio is returning ErrorInvalidState for Output and OK for Input.
+                return Result::OK;
+            }
+        }
+        if (mStreamCallback != nullptr) { // Was a callback requested?
+            setDataCallbackEnabled(true);
+        }
         return static_cast<Result>(mLibLoader->stream_requestStart(stream));
     } else {
-        return Result::ErrorNull;
+        return Result::ErrorClosed;
     }
 }
 
@@ -238,9 +310,16 @@ Result AudioStreamAAudio::requestPause() {
     std::lock_guard<std::mutex> lock(mLock);
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
+        // Avoid state machine errors in O_MR1.
+        if (getSdkVersion() <= __ANDROID_API_O_MR1__) {
+            StreamState state = static_cast<StreamState>(mLibLoader->stream_getState(stream));
+            if (state == StreamState::Pausing || state == StreamState::Paused) {
+                return Result::OK;
+            }
+        }
         return static_cast<Result>(mLibLoader->stream_requestPause(stream));
     } else {
-        return Result::ErrorNull;
+        return Result::ErrorClosed;
     }
 }
 
@@ -248,9 +327,16 @@ Result AudioStreamAAudio::requestFlush() {
     std::lock_guard<std::mutex> lock(mLock);
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
+        // Avoid state machine errors in O_MR1.
+        if (getSdkVersion() <= __ANDROID_API_O_MR1__) {
+            StreamState state = static_cast<StreamState>(mLibLoader->stream_getState(stream));
+            if (state == StreamState::Flushing || state == StreamState::Flushed) {
+                return Result::OK;
+            }
+        }
         return static_cast<Result>(mLibLoader->stream_requestFlush(stream));
     } else {
-        return Result::ErrorNull;
+        return Result::ErrorClosed;
     }
 }
 
@@ -258,123 +344,188 @@ Result AudioStreamAAudio::requestStop() {
     std::lock_guard<std::mutex> lock(mLock);
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
+        // Avoid state machine errors in O_MR1.
+        if (getSdkVersion() <= __ANDROID_API_O_MR1__) {
+            StreamState state = static_cast<StreamState>(mLibLoader->stream_getState(stream));
+            if (state == StreamState::Stopping || state == StreamState::Stopped) {
+                return Result::OK;
+            }
+        }
         return static_cast<Result>(mLibLoader->stream_requestStop(stream));
     } else {
-        return Result::ErrorNull;
+        return Result::ErrorClosed;
     }
 }
 
-ErrorOrValue<int32_t>   AudioStreamAAudio::write(const void *buffer,
+ResultWithValue<int32_t>   AudioStreamAAudio::write(const void *buffer,
                                      int32_t numFrames,
                                      int64_t timeoutNanoseconds) {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
         int32_t result = mLibLoader->stream_write(mAAudioStream, buffer,
                                                   numFrames, timeoutNanoseconds);
-        if (result < 0) {
-            return ErrorOrValue<int32_t>(static_cast<Result>(result));
-        } else {
-            return ErrorOrValue<int32_t>(result);
-        }
+        return ResultWithValue<int32_t>::createBasedOnSign(result);
     } else {
-        return ErrorOrValue<int32_t>(Result::ErrorNull);
+        return ResultWithValue<int32_t>(Result::ErrorClosed);
     }
 }
 
-ErrorOrValue<int32_t>   AudioStreamAAudio::read(void *buffer,
+ResultWithValue<int32_t>   AudioStreamAAudio::read(void *buffer,
                                  int32_t numFrames,
                                  int64_t timeoutNanoseconds) {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
         int32_t result = mLibLoader->stream_read(mAAudioStream, buffer,
                                                  numFrames, timeoutNanoseconds);
-        if (result < 0) {
-            return ErrorOrValue<int32_t>(static_cast<Result>(result));
-        } else {
-            return ErrorOrValue<int32_t>(result);
-        }
+        return ResultWithValue<int32_t>::createBasedOnSign(result);
     } else {
-        return ErrorOrValue<int32_t>(Result::ErrorNull);
+        return ResultWithValue<int32_t>(Result::ErrorClosed);
     }
 }
 
+
+// AAudioStream_waitForStateChange() can crash if it is waiting on a stream and that stream
+// is closed from another thread.  We do not want to lock the stream for the duration of the call.
+// So we call AAudioStream_waitForStateChange() with a timeout of zero so that it will not block.
+// Then we can do our own sleep with the lock unlocked.
 Result AudioStreamAAudio::waitForStateChange(StreamState currentState,
                                         StreamState *nextState,
                                         int64_t timeoutNanoseconds) {
-    AAudioStream *stream = mAAudioStream.load();
-    if (stream != nullptr) {
+    Result oboeResult = Result::ErrorTimeout;
+    int64_t sleepTimeNanos = 20 * kNanosPerMillisecond; // arbitrary
+    aaudio_stream_state_t currentAAudioState = static_cast<aaudio_stream_state_t>(currentState);
 
+    aaudio_result_t result = AAUDIO_OK;
+    int64_t timeLeftNanos = timeoutNanoseconds;
+
+    mLock.lock();
+    while (true) {
+        // Do we still have an AAudio stream? If not then stream must have been closed.
+        AAudioStream *stream = mAAudioStream.load();
+        if (stream == nullptr) {
+            if (nextState != nullptr) {
+                *nextState = StreamState::Closed;
+            }
+            oboeResult = Result::ErrorClosed;
+            break;
+        }
+
+        // Update and query state change with no blocking.
         aaudio_stream_state_t aaudioNextState;
-        aaudio_result_t result = mLibLoader->stream_waitForStateChange(
-                        mAAudioStream,
-                        static_cast<aaudio_stream_state_t>(currentState),
-                        &aaudioNextState,
-                        timeoutNanoseconds);
-        *nextState = static_cast<StreamState>(aaudioNextState);
-        return static_cast<Result>(result);
+        result = mLibLoader->stream_waitForStateChange(
+                mAAudioStream,
+                currentAAudioState,
+                &aaudioNextState,
+                0); // timeout=0 for non-blocking
+        // AAudio will return AAUDIO_ERROR_TIMEOUT if timeout=0 and the state does not change.
+        if (result != AAUDIO_OK && result != AAUDIO_ERROR_TIMEOUT) {
+            oboeResult = static_cast<Result>(result);
+            break;
+        }
+#if OBOE_FIX_FORCE_STARTING_TO_STARTED
+        if (aaudioNextState == static_cast<aaudio_stream_state_t >(StreamState::Starting)) {
+            aaudioNextState = static_cast<aaudio_stream_state_t >(StreamState::Started);
+        }
+#endif // OBOE_FIX_FORCE_STARTING_TO_STARTED
+        if (nextState != nullptr) {
+            *nextState = static_cast<StreamState>(aaudioNextState);
+        }
+        if (currentAAudioState != aaudioNextState) { // state changed?
+            oboeResult = Result::OK;
+            break;
+        }
+
+        // Did we timeout or did user ask for non-blocking?
+        if (timeLeftNanos <= 0) {
+            break;
+        }
+
+        // No change yet so sleep.
+        mLock.unlock(); // Don't sleep while locked.
+        if (sleepTimeNanos > timeLeftNanos) {
+            sleepTimeNanos = timeLeftNanos; // last little bit
+        }
+        AudioClock::sleepForNanos(sleepTimeNanos);
+        timeLeftNanos -= sleepTimeNanos;
+        mLock.lock();
+    }
+
+    mLock.unlock();
+    return oboeResult;
+}
+
+ResultWithValue<int32_t> AudioStreamAAudio::setBufferSizeInFrames(int32_t requestedFrames) {
+
+    AAudioStream *stream = mAAudioStream.load();
+
+    if (stream != nullptr) {
+
+        if (requestedFrames > mBufferCapacityInFrames) {
+            requestedFrames = mBufferCapacityInFrames;
+        }
+        int32_t newBufferSize = mLibLoader->stream_setBufferSize(mAAudioStream, requestedFrames);
+
+        // Cache the result if it's valid
+        if (newBufferSize > 0) mBufferSizeInFrames = newBufferSize;
+
+        return ResultWithValue<int32_t>::createBasedOnSign(newBufferSize);
+
     } else {
-        return Result::ErrorNull;
+        return ResultWithValue<int32_t>(Result::ErrorClosed);
     }
 }
 
-Result AudioStreamAAudio::setBufferSizeInFrames(int32_t requestedFrames) {
-    if (requestedFrames > mBufferCapacityInFrames) {
-        requestedFrames = mBufferCapacityInFrames;
-    }
-    return static_cast<Result>(mLibLoader->stream_setBufferSize(mAAudioStream, requestedFrames));
-}
-
-StreamState AudioStreamAAudio::getState() {
+StreamState AudioStreamAAudio::getState() const {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
-        return static_cast<StreamState>(mLibLoader->stream_getState(stream));
+        aaudio_stream_state_t aaudioState = mLibLoader->stream_getState(stream);
+#if OBOE_FIX_FORCE_STARTING_TO_STARTED
+        if (aaudioState == AAUDIO_STREAM_STATE_STARTING) {
+            aaudioState = AAUDIO_STREAM_STATE_STARTED;
+        }
+#endif // OBOE_FIX_FORCE_STARTING_TO_STARTED
+        return static_cast<StreamState>(aaudioState);
     } else {
         return StreamState::Closed;
     }
 }
 
-int32_t AudioStreamAAudio::getBufferSizeInFrames() const {
+int32_t AudioStreamAAudio::getBufferSizeInFrames() {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
-        return mLibLoader->stream_getBufferSize(stream);
-    } else {
-        return static_cast<int32_t>(Result::ErrorNull);
+        mBufferSizeInFrames = mLibLoader->stream_getBufferSize(stream);
     }
+    return mBufferSizeInFrames;
 }
 
 int32_t AudioStreamAAudio::getFramesPerBurst() {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
-        return mLibLoader->stream_getFramesPerBurst(stream);
-    } else {
-        return static_cast<int32_t>(Result::ErrorNull);
+        mFramesPerBurst = mLibLoader->stream_getFramesPerBurst(stream);
+    }
+    return mFramesPerBurst;
+}
+
+void AudioStreamAAudio::updateFramesRead() {
+    AAudioStream *stream = mAAudioStream.load();
+    if (stream != nullptr) {
+        mFramesRead = mLibLoader->stream_getFramesRead(stream);
     }
 }
 
-int64_t AudioStreamAAudio::getFramesRead() const {
+void AudioStreamAAudio::updateFramesWritten() {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
-        return mLibLoader->stream_getFramesRead(stream);
-    } else {
-        return static_cast<int32_t>(Result::ErrorNull);
+        mFramesWritten = mLibLoader->stream_getFramesWritten(stream);
     }
 }
 
-int64_t AudioStreamAAudio::getFramesWritten() const {
+ResultWithValue<int32_t> AudioStreamAAudio::getXRunCount() const {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
-        return mLibLoader->stream_getFramesWritten(stream);
+        return ResultWithValue<int32_t>::createBasedOnSign(mLibLoader->stream_getXRunCount(stream));
     } else {
-        return static_cast<int64_t>(Result::ErrorNull);
-    }
-}
-
-int32_t AudioStreamAAudio::getXRunCount() const {
-    AAudioStream *stream = mAAudioStream.load();
-    if (stream != nullptr) {
-        return mLibLoader->stream_getXRunCount(stream);
-    } else {
-        return static_cast<int32_t>(Result::ErrorNull);
+        return ResultWithValue<int32_t>(Result::ErrorNull);
     }
 }
 
@@ -383,6 +534,9 @@ Result AudioStreamAAudio::getTimestamp(clockid_t clockId,
                                    int64_t *timeNanoseconds) {
     AAudioStream *stream = mAAudioStream.load();
     if (stream != nullptr) {
+        if (getState() != StreamState::Started) {
+            return Result::ErrorInvalidState;
+        }
         return static_cast<Result>(mLibLoader->stream_getTimestamp(stream, clockId,
                                                framePosition, timeNanoseconds));
     } else {
@@ -390,10 +544,28 @@ Result AudioStreamAAudio::getTimestamp(clockid_t clockId,
     }
 }
 
-ErrorOrValue<double> AudioStreamAAudio::calculateLatencyMillis() {
+ResultWithValue<FrameTimestamp> AudioStreamAAudio::getTimestamp(clockid_t clockId) {
+
+    FrameTimestamp frame;
+    AAudioStream *stream = mAAudioStream.load();
+    if (stream != nullptr) {
+        aaudio_result_t result = mLibLoader->stream_getTimestamp(stream, clockId,
+                                                                 &frame.position,
+                                                                 &frame.timestamp);
+        if (result == static_cast<aaudio_result_t>(Result::OK)){
+            return ResultWithValue<FrameTimestamp>(frame);
+        } else {
+            return ResultWithValue<FrameTimestamp>(static_cast<Result>(result));
+        }
+    } else {
+        return ResultWithValue<FrameTimestamp>(Result::ErrorNull);
+    }
+}
+
+ResultWithValue<double> AudioStreamAAudio::calculateLatencyMillis() {
     AAudioStream *stream = mAAudioStream.load();
     if (stream == nullptr) {
-        return ErrorOrValue<double>(Result::ErrorNull);
+        return ResultWithValue<double>(Result::ErrorClosed);
     }
 
     // Get the time that a known audio frame was presented.
@@ -403,7 +575,7 @@ ErrorOrValue<double> AudioStreamAAudio::calculateLatencyMillis() {
                                &hardwareFrameIndex,
                                &hardwareFrameHardwareTime);
     if (result != oboe::Result::OK) {
-        return ErrorOrValue<double>(static_cast<Result>(result));
+        return ResultWithValue<double>(static_cast<Result>(result));
     }
 
     // Get counter closest to the app.
@@ -424,12 +596,21 @@ ErrorOrValue<double> AudioStreamAAudio::calculateLatencyMillis() {
 
     // The current latency is the difference in time between when the current frame is at
     // the app and when it is at the hardware.
-    double latencyNanos = (double)((isOutput)
+    double latencyNanos = static_cast<double>(isOutput
                           ? (appFrameHardwareTime - appFrameAppTime) // hardware is later
                           : (appFrameAppTime - appFrameHardwareTime)); // hardware is earlier
     double latencyMillis = latencyNanos / kNanosPerMillisecond;
 
-    return ErrorOrValue<double>(latencyMillis);
+    return ResultWithValue<double>(latencyMillis);
+}
+
+bool AudioStreamAAudio::isMMapUsed() {
+    AAudioStream *stream = mAAudioStream.load();
+    if (stream != nullptr) {
+        return mLibLoader->stream_isMMapUsed(stream);
+    } else {
+        return false;
+    }
 }
 
 } // namespace oboe

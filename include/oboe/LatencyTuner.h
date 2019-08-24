@@ -25,9 +25,8 @@
 namespace oboe {
 
 /**
- * This can be used to dynamically tune the latency of an output stream.
- * It adjusts the bufferSize based on the number of underruns.
- * The bufferSize is the portion of the total bufferCapacity that is used to store data.
+ * LatencyTuner can be used to dynamically tune the latency of an output stream.
+ * It adjusts the stream's bufferSize by monitoring the number of underruns.
  *
  * This only affects the latency associated with the first level of buffering that is closest
  * to the application. It does not affect low latency in the HAL, or touch latency in the UI.
@@ -41,7 +40,21 @@ namespace oboe {
  */
 class LatencyTuner {
 public:
+
+    /**
+     * Construct a new LatencyTuner object which will act on the given audio stream
+     *
+     * @param stream the stream who's latency will be tuned
+     */
     explicit LatencyTuner(AudioStream &stream);
+
+    /**
+     * Construct a new LatencyTuner object which will act on the given audio stream.
+     *
+     * @param stream the stream who's latency will be tuned
+     * @param the maximum buffer size which the tune() operation will set the buffer size to
+     */
+     explicit LatencyTuner(AudioStream &stream, int32_t maximumBufferSize);
 
     /**
      * Adjust the bufferSizeInFrames to optimize latency.
@@ -62,6 +75,14 @@ public:
      * call this from a button handler.
      */
     void requestReset();
+
+    /**
+     * @return true if the audio stream's buffer size is at the maximum value. If no maximum value
+     * was specified when constructing the LatencyTuner then the value of
+     * stream->getBufferCapacityInFrames is used
+     */
+     bool isAtMaximumBufferSize();
+
 
 private:
 
@@ -85,6 +106,7 @@ private:
 
     AudioStream           &mStream;
     State                 mState = State::Idle;
+    int32_t               mMaxBufferSize = 0;
     int32_t               mPreviousXRuns = 0;
     int32_t               mIdleCountDown = 0;
     std::atomic<int32_t>  mLatencyTriggerRequests{0}; // TODO user atomic requester from AAudio

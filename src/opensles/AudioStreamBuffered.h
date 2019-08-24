@@ -18,7 +18,7 @@
 #define OBOE_STREAM_BUFFERED_H
 
 #include <cstring>
-#include <assert.h>
+#include <cassert>
 #include "common/OboeDebug.h"
 #include "oboe/AudioStream.h"
 #include "oboe/AudioStreamCallback.h"
@@ -37,27 +37,23 @@ public:
     void allocateFifo();
 
 
-    ErrorOrValue<int32_t> write(const void *buffer,
+    ResultWithValue<int32_t> write(const void *buffer,
                   int32_t numFrames,
                   int64_t timeoutNanoseconds) override;
 
-    ErrorOrValue<int32_t> read(void *buffer,
+    ResultWithValue<int32_t> read(void *buffer,
                  int32_t numFrames,
                  int64_t timeoutNanoseconds) override;
 
-    Result setBufferSizeInFrames(int32_t requestedFrames) override;
-
-    int32_t getBufferSizeInFrames() const override;
+    ResultWithValue<int32_t> setBufferSizeInFrames(int32_t requestedFrames) override;
 
     int32_t getBufferCapacityInFrames() const override;
 
-    int32_t getXRunCount() const override {
-        return mXRunCount;
+    ResultWithValue<int32_t> getXRunCount() const override {
+        return ResultWithValue<int32_t>(mXRunCount);
     }
 
-    int64_t getFramesWritten() const override;
-
-    int64_t getFramesRead() const override;
+    bool isXRunCountSupported() const override;
 
 protected:
 
@@ -66,23 +62,25 @@ protected:
     // If there is no callback then we need a FIFO between the App and OpenSL ES.
     bool usingFIFO() const { return getCallback() == nullptr; }
 
-    virtual Result updateServiceFrameCounter() { return Result::OK; };
+    virtual Result updateServiceFrameCounter() = 0;
+
+    void updateFramesRead() override;
+    void updateFramesWritten() override;
 
 private:
 
-
     int64_t predictNextCallbackTime();
 
-    void markCallbackTime(int numFrames);
+    void markCallbackTime(int32_t numFrames);
 
     // Read or write to the FIFO.
-    ErrorOrValue<int32_t> transfer(void *buffer, int32_t numFrames, int64_t timeoutNanoseconds);
+    ResultWithValue<int32_t> transfer(void *buffer, int32_t numFrames, int64_t timeoutNanoseconds);
 
     void incrementXRunCount() {
-        mXRunCount++;
+        ++mXRunCount;
     }
 
-    std::unique_ptr<FifoBuffer>                  mFifoBuffer;
+    std::unique_ptr<FifoBuffer>   mFifoBuffer{};
 
     int64_t mBackgroundRanAtNanoseconds = 0;
     int32_t mLastBackgroundSize = 0;

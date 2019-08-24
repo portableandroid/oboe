@@ -21,15 +21,12 @@
 #include <mutex>
 #include <thread>
 
-#include "aaudio/AAudio.h"
-
 #include "oboe/AudioStreamBuilder.h"
 #include "oboe/AudioStream.h"
 #include "oboe/Definitions.h"
+#include "AAudioLoader.h"
 
 namespace oboe {
-
-class AAudioLoader;
 
 /**
  * Implementation of OboeStream that uses AAudio.
@@ -42,7 +39,7 @@ public:
     AudioStreamAAudio();
     explicit AudioStreamAAudio(const AudioStreamBuilder &builder);
 
-    ~AudioStreamAAudio();
+    virtual ~AudioStreamAAudio() = default;
 
     /**
      *
@@ -60,23 +57,21 @@ public:
     Result requestFlush() override;
     Result requestStop() override;
 
-    ErrorOrValue<int32_t> write(const void *buffer,
+    ResultWithValue<int32_t> write(const void *buffer,
                   int32_t numFrames,
                   int64_t timeoutNanoseconds) override;
 
-    ErrorOrValue<int32_t> read(void *buffer,
+    ResultWithValue<int32_t> read(void *buffer,
                  int32_t numFrames,
                  int64_t timeoutNanoseconds) override;
 
-    Result setBufferSizeInFrames(int32_t requestedFrames) override;
-    int32_t getBufferSizeInFrames() const override;
+    ResultWithValue<int32_t> setBufferSizeInFrames(int32_t requestedFrames) override;
+    int32_t getBufferSizeInFrames() override;
     int32_t getFramesPerBurst() override;
-    int32_t getXRunCount() const override;
+    ResultWithValue<int32_t> getXRunCount() const override;
+    bool isXRunCountSupported() const override { return true; }
 
-    int64_t getFramesRead() const override;
-    int64_t getFramesWritten() const override;
-
-    ErrorOrValue<double> calculateLatencyMillis() override;
+    ResultWithValue<double> calculateLatencyMillis() override;
 
     Result waitForStateChange(StreamState currentState,
                               StreamState *nextState,
@@ -86,7 +81,9 @@ public:
                                        int64_t *framePosition,
                                        int64_t *timeNanoseconds) override;
 
-    StreamState getState() override;
+    ResultWithValue<FrameTimestamp> getTimestamp(clockid_t clockId) override;
+
+    StreamState getState() const override;
 
     AudioApi getAudioApi() const override {
         return AudioApi::AAudio;
@@ -96,26 +93,26 @@ public:
                                                    void *audioData,
                                                    int32_t numFrames);
 
-    void onErrorCallback(AAudioStream *stream, Result error);
-
-    void onErrorInThread(AAudioStream *stream, Result error);
-
+protected:
+    static void internalErrorCallback(
+            AAudioStream *stream,
+            void *userData,
+            aaudio_result_t error);
 
     void *getUnderlyingStream() const override {
         return mAAudioStream.load();
     }
 
-protected:
-    Result convertApplicationDataToNative(int32_t numFrames); // TODO remove?
+    void updateFramesRead() override;
+    void updateFramesWritten() override;
 
 private:
 
-    float               *mFloatCallbackBuffer;
-    int16_t             *mShortCallbackBuffer;
-    std::atomic<bool>    mCallbackThreadEnabled;
-    std::thread         *mErrorHandlingThread = nullptr;
+    bool                 isMMapUsed();
 
-    std::mutex           mLock; // for synchronizing start/stop/close
+    std::atomic<bool>    mCallbackThreadEnabled;
+
+    // pointer to the underlying AAudio stream, valid if open, null if closed
     std::atomic<AAudioStream *> mAAudioStream{nullptr};
 
     static AAudioLoader *mLibLoader;

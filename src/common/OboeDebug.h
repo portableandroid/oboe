@@ -14,15 +14,18 @@
  * limitations under the License.
  *
  */
+
 #ifndef OBOE_DEBUG_H
 #define OBOE_DEBUG_H
-#include <android/log.h>
 
-#if 1
+#if OBOE_ENABLE_LOGGING
+
+#include <android/log.h>
 
 #ifndef MODULE_NAME
 #define MODULE_NAME  "OboeAudio"
 #endif
+
 #define LOGV(...) __android_log_print(ANDROID_LOG_VERBOSE, MODULE_NAME, __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, MODULE_NAME, __VA_ARGS__)
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, MODULE_NAME, __VA_ARGS__)

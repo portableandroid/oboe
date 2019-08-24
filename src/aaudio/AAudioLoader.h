@@ -20,9 +20,49 @@
 #include <unistd.h>
 #include "oboe/Definitions.h"
 
-#include "aaudio/AAudio.h"
+// If the NDK is before O then define this in your build
+// so that AAudio.h will not be included.
+#ifdef OBOE_NO_INCLUDE_AAUDIO
+
+// Define missing types from AAudio.h
+typedef int32_t aaudio_stream_state_t;
+typedef int32_t aaudio_direction_t;
+typedef int32_t aaudio_format_t;
+typedef int32_t aaudio_data_callback_result_t;
+typedef int32_t aaudio_result_t;
+typedef int32_t aaudio_sharing_mode_t;
+typedef int32_t aaudio_performance_mode_t;
+
+typedef struct AAudioStreamStruct         AAudioStream;
+typedef struct AAudioStreamBuilderStruct  AAudioStreamBuilder;
+
+typedef aaudio_data_callback_result_t (*AAudioStream_dataCallback)(
+        AAudioStream *stream,
+        void *userData,
+        void *audioData,
+        int32_t numFrames);
+
+typedef void (*AAudioStream_errorCallback)(
+        AAudioStream *stream,
+        void *userData,
+        aaudio_result_t error);
+
+// These were defined in P
+typedef int32_t aaudio_usage_t;
+typedef int32_t aaudio_content_type_t;
+typedef int32_t aaudio_input_preset_t;
+typedef int32_t aaudio_session_id_t;
+#else
+#include <aaudio/AAudio.h>
+#include <android/ndk-version.h>
+#endif
+
+#ifndef __NDK_MAJOR__
+#define __NDK_MAJOR__ 0
+#endif
 
 namespace oboe {
+
 
 /**
  * The AAudio API was not available in early versions of Android.
@@ -32,11 +72,22 @@ namespace oboe {
 class AAudioLoader {
   public:
     // Use signatures for common functions.
-    typedef const char * (*signature_PC_I)(int32_t);
-    typedef int32_t (*signature_I_I)(int32_t);
-    typedef int32_t (*signature_I_II)(int32_t, int32_t);
-    typedef int32_t (*signature_I_IPI)(int32_t, int32_t *);
-    typedef int32_t (*signature_I_IIPI)(int32_t, int32_t, int32_t *);
+    // Key to letter abbreviations.
+    // S = Stream
+    // B = Builder
+    // I = int32_t
+    // L = int64_t
+    // T = sTate
+    // K = clocKid_t
+    // P = Pointer to following data type
+    // C = Const prefix
+    // H = cHar
+    typedef int32_t  (*signature_I_PPB)(AAudioStreamBuilder **builder);
+
+    typedef const char * (*signature_CPH_I)(int32_t);
+
+    typedef int32_t (*signature_I_PBPPS)(AAudioStreamBuilder *,
+                                      AAudioStream **stream);  // AAudioStreamBuilder_open()
 
     typedef int32_t (*signature_I_PB)(AAudioStreamBuilder *);  // AAudioStreamBuilder_delete()
     // AAudioStreamBuilder_setSampleRate()
@@ -47,6 +98,28 @@ class AAudioLoader {
     // AAudioStream_setBufferSizeInFrames()
     typedef int32_t (*signature_I_PSI)(AAudioStream *, int32_t);
 
+    typedef void    (*signature_V_PBPDPV)(AAudioStreamBuilder *,
+                                          AAudioStream_dataCallback,
+                                          void *);
+
+    typedef void    (*signature_V_PBPEPV)(AAudioStreamBuilder *,
+                                          AAudioStream_errorCallback,
+                                          void *);
+
+    typedef aaudio_format_t (*signature_F_PS)(AAudioStream *stream);
+
+    typedef int32_t (*signature_I_PSPVIL)(AAudioStream *, void *, int32_t, int64_t);
+    typedef int32_t (*signature_I_PSCPVIL)(AAudioStream *, const void *, int32_t, int64_t);
+
+    typedef int32_t (*signature_I_PSTPTL)(AAudioStream *,
+                                          aaudio_stream_state_t,
+                                          aaudio_stream_state_t *,
+                                          int64_t);
+
+    typedef int32_t (*signature_I_PSKPLPL)(AAudioStream *, clockid_t, int64_t *, int64_t *);
+
+    typedef bool    (*signature_B_PS)(AAudioStream *);
+
     static AAudioLoader* getInstance(); // singleton
 
     /**
@@ -54,110 +127,99 @@ class AAudioLoader {
      * This can be called multiple times.
      * It should only be called from one thread.
      *
+     * The destructor will clean up after the open.
+     *
      * @return 0 if successful or negative error.
      */
     int open();
 
-    /**
-     * Close the AAudio shared library.
-     * This can be called multiple times.
-     * It should only be called from one thread.
-     *
-     * The open() and close() do not nest. Calling close() once will always close the library.
-     * The destructor will call close() so you don't need to.
-     *
-     * @return 0 if successful or negative error.
-     */
-    int close();
-
     // Function pointers into the AAudio shared library.
-    aaudio_result_t (*createStreamBuilder)(AAudioStreamBuilder **builder);
+    signature_I_PPB   createStreamBuilder = nullptr;
 
-    aaudio_result_t  (*builder_openStream)(AAudioStreamBuilder *builder,
-                                           AAudioStream **stream);
+    signature_I_PBPPS builder_openStream = nullptr;
 
-    signature_V_PBI builder_setBufferCapacityInFrames;
-    signature_V_PBI builder_setChannelCount;
-    signature_V_PBI builder_setDeviceId;
-    signature_V_PBI builder_setDirection;
-    signature_V_PBI builder_setFormat;
-    signature_V_PBI builder_setFramesPerDataCallback;
-    signature_V_PBI builder_setPerformanceMode;
-    signature_V_PBI builder_setSampleRate;
-    signature_V_PBI builder_setSharingMode;
+    signature_V_PBI builder_setBufferCapacityInFrames = nullptr;
+    signature_V_PBI builder_setChannelCount = nullptr;
+    signature_V_PBI builder_setDeviceId = nullptr;
+    signature_V_PBI builder_setDirection = nullptr;
+    signature_V_PBI builder_setFormat = nullptr;
+    signature_V_PBI builder_setFramesPerDataCallback = nullptr;
+    signature_V_PBI builder_setPerformanceMode = nullptr;
+    signature_V_PBI builder_setSampleRate = nullptr;
+    signature_V_PBI builder_setSharingMode = nullptr;
 
-    void (*builder_setDataCallback)(AAudioStreamBuilder *builder,
-                                    AAudioStream_dataCallback callback,
-                                    void *userData);
+    signature_V_PBI builder_setUsage = nullptr;
+    signature_V_PBI builder_setContentType = nullptr;
+    signature_V_PBI builder_setInputPreset = nullptr;
+    signature_V_PBI builder_setSessionId = nullptr;
 
-    void (*builder_setErrorCallback)(AAudioStreamBuilder *builder,
-                                    AAudioStream_errorCallback callback,
-                                    void *userData);
+    signature_V_PBPDPV  builder_setDataCallback = nullptr;
+    signature_V_PBPEPV  builder_setErrorCallback = nullptr;
 
-    signature_I_PB  builder_delete;
+    signature_I_PB      builder_delete = nullptr;
 
-    aaudio_format_t (*stream_getFormat)(AAudioStream *stream);
+    signature_F_PS      stream_getFormat = nullptr;
 
-    aaudio_result_t (*stream_read)(AAudioStream* stream,
-                                   void *buffer,
-                                   int32_t numFrames,
-                                   int64_t timeoutNanoseconds);
+    signature_I_PSPVIL  stream_read = nullptr;
+    signature_I_PSCPVIL stream_write = nullptr;
 
-    aaudio_result_t (*stream_write)(AAudioStream *stream,
-                                   const void *buffer,
-                                   int32_t numFrames,
-                                   int64_t timeoutNanoseconds);
+    signature_I_PSTPTL  stream_waitForStateChange = nullptr;
 
-    aaudio_result_t (*stream_waitForStateChange)(AAudioStream *stream,
-                                                 aaudio_stream_state_t inputState,
-                                                 aaudio_stream_state_t *nextState,
-                                                 int64_t timeoutNanoseconds);
+    signature_I_PSKPLPL stream_getTimestamp = nullptr;
 
-    aaudio_result_t (*stream_getTimestamp)(AAudioStream *stream,
-                                          clockid_t clockid,
-                                          int64_t *framePosition,
-                                          int64_t *timeNanoseconds);
+    signature_B_PS      stream_isMMapUsed = nullptr;
 
-    signature_I_PS   stream_close;
+    signature_I_PS   stream_close = nullptr;
 
-    signature_I_PS   stream_getChannelCount;
-    signature_I_PS   stream_getDeviceId;
-    signature_I_PS   stream_getDirection;
-    signature_I_PS   stream_getBufferSize;
-    signature_I_PS   stream_getBufferCapacity;
-    signature_I_PS   stream_getFramesPerBurst;
-    signature_I_PS   stream_getState;
-    signature_I_PS   stream_getPerformanceMode;
-    signature_I_PS   stream_getSampleRate;
-    signature_I_PS   stream_getSharingMode;
-    signature_I_PS   stream_getXRunCount;
+    signature_I_PS   stream_getChannelCount = nullptr;
+    signature_I_PS   stream_getDeviceId = nullptr;
 
-    signature_I_PSI  stream_setBufferSize;
-    signature_I_PS   stream_requestStart;
-    signature_I_PS   stream_requestPause;
-    signature_I_PS   stream_requestFlush;
-    signature_I_PS   stream_requestStop;
+    signature_I_PS   stream_getBufferSize = nullptr;
+    signature_I_PS   stream_getBufferCapacity = nullptr;
+    signature_I_PS   stream_getFramesPerBurst = nullptr;
+    signature_I_PS   stream_getState = nullptr;
+    signature_I_PS   stream_getPerformanceMode = nullptr;
+    signature_I_PS   stream_getSampleRate = nullptr;
+    signature_I_PS   stream_getSharingMode = nullptr;
+    signature_I_PS   stream_getXRunCount = nullptr;
 
-    signature_L_PS   stream_getFramesRead;
-    signature_L_PS   stream_getFramesWritten;
+    signature_I_PSI  stream_setBufferSize = nullptr;
+    signature_I_PS   stream_requestStart = nullptr;
+    signature_I_PS   stream_requestPause = nullptr;
+    signature_I_PS   stream_requestFlush = nullptr;
+    signature_I_PS   stream_requestStop = nullptr;
 
-    signature_PC_I   convertResultToText;
-    signature_PC_I   convertStreamStateToText;
+    signature_L_PS   stream_getFramesRead = nullptr;
+    signature_L_PS   stream_getFramesWritten = nullptr;
 
-    // TODO add any missing AAudio functions.
+    signature_CPH_I  convertResultToText = nullptr;
+
+    signature_I_PS   stream_getUsage = nullptr;
+    signature_I_PS   stream_getContentType = nullptr;
+    signature_I_PS   stream_getInputPreset = nullptr;
+    signature_I_PS   stream_getSessionId = nullptr;
 
   private:
     AAudioLoader() {}
     ~AAudioLoader();
 
     // Load function pointers for specific signatures.
-    signature_PC_I   load_PC_I(const char *name);
-
-    signature_V_PBI  load_V_PBI(const char *name);
-    signature_I_PB   load_I_PB(const char *name);
-    signature_I_PS   load_I_PS(const char *name);
-    signature_L_PS   load_L_PS(const char *name);
-    signature_I_PSI  load_I_PSI(const char *name);
+    signature_I_PPB     load_I_PPB(const char *name);
+    signature_CPH_I     load_CPH_I(const char *name);
+    signature_V_PBI     load_V_PBI(const char *name);
+    signature_V_PBPDPV  load_V_PBPDPV(const char *name);
+    signature_V_PBPEPV  load_V_PBPEPV(const char *name);
+    signature_I_PB      load_I_PB(const char *name);
+    signature_I_PBPPS   load_I_PBPPS(const char *name);
+    signature_I_PS      load_I_PS(const char *name);
+    signature_L_PS      load_L_PS(const char *name);
+    signature_F_PS      load_F_PS(const char *name);
+    signature_B_PS      load_B_PS(const char *name);
+    signature_I_PSI     load_I_PSI(const char *name);
+    signature_I_PSPVIL  load_I_PSPVIL(const char *name);
+    signature_I_PSCPVIL load_I_PSCPVIL(const char *name);
+    signature_I_PSTPTL  load_I_PSTPTL(const char *name);
+    signature_I_PSKPLPL load_I_PSKPLPL(const char *name);
 
     void *mLibHandle = nullptr;
 };

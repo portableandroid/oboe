@@ -63,10 +63,10 @@ error:
 void EngineOpenSLES::close() {
     std::lock_guard<std::mutex> lock(mLock);
     if (--mOpenCount == 0) {
-        if (mEngineObject != NULL) {
+        if (mEngineObject != nullptr) {
             (*mEngineObject)->Destroy(mEngineObject);
-            mEngineObject = NULL;
-            mEngineInterface = NULL;
+            mEngineObject = nullptr;
+            mEngineInterface = nullptr;
         }
     }
 }
@@ -79,8 +79,8 @@ SLresult EngineOpenSLES::createAudioPlayer(SLObjectItf *objectItf,
                                            SLDataSource *audioSource,
                                            SLDataSink *audioSink) {
 
-    const SLInterfaceID ids[] = {SL_IID_BUFFERQUEUE};
-    const SLboolean reqs[] = {SL_BOOLEAN_TRUE};
+    const SLInterfaceID ids[] = {SL_IID_BUFFERQUEUE, SL_IID_ANDROIDCONFIGURATION};
+    const SLboolean reqs[] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
 
     return (*mEngineInterface)->CreateAudioPlayer(mEngineInterface, objectItf, audioSource,
                                                   audioSink,
@@ -91,8 +91,7 @@ SLresult EngineOpenSLES::createAudioRecorder(SLObjectItf *objectItf,
                                              SLDataSource *audioSource,
                                              SLDataSink *audioSink) {
 
-    const SLInterfaceID ids[] = {SL_IID_ANDROIDSIMPLEBUFFERQUEUE,
-                                 SL_IID_ANDROIDCONFIGURATION };
+    const SLInterfaceID ids[] = {SL_IID_ANDROIDSIMPLEBUFFERQUEUE, SL_IID_ANDROIDCONFIGURATION };
     const SLboolean reqs[] = {SL_BOOLEAN_TRUE, SL_BOOLEAN_TRUE};
 
     return (*mEngineInterface)->CreateAudioRecorder(mEngineInterface, objectItf, audioSource,

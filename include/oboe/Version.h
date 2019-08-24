@@ -17,6 +17,8 @@
 #ifndef OBOE_VERSIONINFO_H
 #define OBOE_VERSIONINFO_H
 
+#include <cstdint>
+
 /**
  * A note on use of preprocessor defines:
  *
@@ -29,10 +31,10 @@
  */
 
 // Type: 8-bit unsigned int. Min value: 0 Max value: 255. See below for description.
-#define OBOE_VERSION_MAJOR 0
+#define OBOE_VERSION_MAJOR 1
 
 // Type: 8-bit unsigned int. Min value: 0 Max value: 255. See below for description.
-#define OBOE_VERSION_MINOR 10
+#define OBOE_VERSION_MINOR 2
 
 // Type: 16-bit unsigned int. Min value: 0 Max value: 65535. See below for description.
 #define OBOE_VERSION_PATCH 0
@@ -51,6 +53,11 @@
 
 namespace oboe {
 
+const char * getVersionText();
+
+/**
+ * Oboe versioning object
+ */
 struct Version {
     /**
      * This is incremented when we make breaking API changes. Based loosely on https://semver.org/.

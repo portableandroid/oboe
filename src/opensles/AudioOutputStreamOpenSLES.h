@@ -34,7 +34,7 @@ public:
     AudioOutputStreamOpenSLES();
     explicit AudioOutputStreamOpenSLES(const AudioStreamBuilder &builder);
 
-    virtual ~AudioOutputStreamOpenSLES();
+    virtual ~AudioOutputStreamOpenSLES() = default;
 
     Result open() override;
     Result close() override;
@@ -44,21 +44,21 @@ public:
     Result requestFlush() override;
     Result requestStop() override;
 
-    Result waitForStateChange(StreamState currentState,
-                              StreamState *nextState,
-                              int64_t timeoutNanoseconds) override;
-
-    int chanCountToChanMask(int chanCount);
-
-    int64_t getFramesRead() const override;
-
 protected:
 
     void setFramesRead(int64_t framesRead);
 
     Result updateServiceFrameCounter() override;
 
+    void updateFramesRead() override;
+
 private:
+
+    SLuint32 channelCountToChannelMask(int chanCount) const;
+
+    Result onAfterDestroy() override;
+
+    Result requestFlush_l();
 
     /**
      * Set OpenSL ES PLAYSTATE.
@@ -66,7 +66,7 @@ private:
      * @param newState SL_PLAYSTATE_PAUSED, SL_PLAYSTATE_PLAYING, SL_PLAYSTATE_STOPPED
      * @return
      */
-    Result setPlayState(SLuint32 newState);
+    Result setPlayState_l(SLuint32 newState);
 
     SLPlayItf      mPlayInterface = nullptr;
 

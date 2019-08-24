@@ -22,8 +22,9 @@
 
 namespace oboe {
 
-constexpr int32_t kDefaultFramesPerBurst = 192; // arbitrary value, 4 msec at 48000 Hz
-
+    // This depends on AudioStream, so we use forward declaration, it will close and delete the stream
+    struct StreamDeleterFunctor;
+    using ManagedStream = std::unique_ptr<AudioStream, StreamDeleterFunctor>;
 /**
  * Factory class for an audio Stream.
  */
@@ -31,6 +32,8 @@ class AudioStreamBuilder : public AudioStreamBase {
 public:
 
     AudioStreamBuilder() : AudioStreamBase() {}
+
+    AudioStreamBuilder(const AudioStreamBase &audioStreamBase): AudioStreamBase(audioStreamBase) {}
 
     /**
      * Request a specific number of channels.
@@ -100,8 +103,11 @@ public:
     }
 
     /**
-     * Set the requested maximum buffer capacity in frames.
-     * The final stream capacity may differ, but will probably be at least this big.
+     * Set the requested buffer capacity in frames.
+     * BufferCapacityInFrames is the maximum possible BufferSizeInFrames.
+     *
+     * The final stream capacity may differ. For AAudio it should be at least this big.
+     * For OpenSL ES, it could be smaller.
      *
      * Default is kUnspecified.
      *
@@ -113,11 +119,25 @@ public:
         return this;
     }
 
+    /**
+     * Get the audio API which will be requested when opening the stream. No guarantees that this is
+     * the API which will actually be used. Query the stream itself to find out the API which is
+     * being used.
+     *
+     * If you do not specify the API, then AAudio will be used if isAAudioRecommended()
+     * returns true. Otherwise OpenSL ES will be used.
+     *
+     * @return the requested audio API
+     */
     AudioApi getAudioApi() const { return mAudioApi; }
 
     /**
      * If you leave this unspecified then Oboe will choose the best API
      * for the device and SDK version at runtime.
+     *
+     * This should almost always be left unspecified, except for debugging purposes.
+     * Specifying AAudio will force Oboe to use AAudio on 8.0, which is extremely risky.
+     * Specifying OpenSLES should mainly be used to test legacy performance/functionality.
      *
      * If the caller requests AAudio and it is supported then AAudio will be used.
      *
@@ -132,7 +152,7 @@ public:
     /**
      * Is the AAudio API supported on this device?
      *
-     * AAudio was introduced in the Oreo release.
+     * AAudio was introduced in the Oreo 8.0 release.
      *
      * @return true if supported
      */
@@ -142,6 +162,7 @@ public:
      * Is the AAudio API recommended this device?
      *
      * AAudio may be supported but not recommended because of version specific issues.
+     * AAudio is not recommended for Android 8.0 or earlier versions.
      *
      * @return true if recommended
      */
@@ -173,11 +194,101 @@ public:
         return this;
     }
 
+
     /**
-     * Request an audio device identified device using an ID.
-     * On Android, for example, the ID could be obtained from the Java AudioManager.
+     * Set the intended use case for the stream.
      *
-     * By default, the primary device will be used.
+     * The system will use this information to optimize the behavior of the stream.
+     * This could, for example, affect how volume and focus is handled for the stream.
+     *
+     * The default, if you do not call this function, is Usage::Media.
+     *
+     * Added in API level 28.
+     *
+     * @param usage the desired usage, eg. Usage::Game
+     */
+    AudioStreamBuilder *setUsage(Usage usage) {
+        mUsage = usage;
+        return this;
+    }
+
+    /**
+     * Set the type of audio data that the stream will carry.
+     *
+     * The system will use this information to optimize the behavior of the stream.
+     * This could, for example, affect whether a stream is paused when a notification occurs.
+     *
+     * The default, if you do not call this function, is ContentType::Music.
+     *
+     * Added in API level 28.
+     *
+     * @param contentType the type of audio data, eg. ContentType::Speech
+     */
+    AudioStreamBuilder *setContentType(ContentType contentType) {
+        mContentType = contentType;
+        return this;
+    }
+
+    /**
+     * Set the input (capture) preset for the stream.
+     *
+     * The system will use this information to optimize the behavior of the stream.
+     * This could, for example, affect which microphones are used and how the
+     * recorded data is processed.
+     *
+     * The default, if you do not call this function, is InputPreset::VoiceRecognition.
+     * That is because VoiceRecognition is the preset with the lowest latency
+     * on many platforms.
+     *
+     * Added in API level 28.
+     *
+     * @param inputPreset the desired configuration for recording
+     */
+    AudioStreamBuilder *setInputPreset(InputPreset inputPreset) {
+        mInputPreset = inputPreset;
+        return this;
+    }
+
+    /** Set the requested session ID.
+     *
+     * The session ID can be used to associate a stream with effects processors.
+     * The effects are controlled using the Android AudioEffect Java API.
+     *
+     * The default, if you do not call this function, is SessionId::None.
+     *
+     * If set to SessionId::Allocate then a session ID will be allocated
+     * when the stream is opened.
+     *
+     * The allocated session ID can be obtained by calling AudioStream::getSessionId()
+     * and then used with this function when opening another stream.
+     * This allows effects to be shared between streams.
+     *
+     * Session IDs from Oboe can be used the Android Java APIs and vice versa.
+     * So a session ID from an Oboe stream can be passed to Java
+     * and effects applied using the Java AudioEffect API.
+     *
+     * Allocated session IDs will always be positive and nonzero.
+     *
+     * Added in API level 28.
+     *
+     * @param sessionId an allocated sessionID or SessionId::Allocate
+     */
+    AudioStreamBuilder *setSessionId(SessionId sessionId) {
+        mSessionId = sessionId;
+        return this;
+    }
+
+    /**
+     * Request a stream to a specific audio input/output device given an audio device ID.
+     *
+     * In most cases, the primary device will be the appropriate device to use, and the
+     * deviceId can be left kUnspecified.
+     *
+     * On Android, for example, the ID could be obtained from the Java AudioManager.
+     * AudioManager.getDevices() returns an array of AudioDeviceInfo[], which contains
+     * a getId() method (as well as other type information), that should be passed
+     * to this method.
+     *
      *
      * Note that when using OpenSL ES, this will be ignored and the created
      * stream will have deviceId kUnspecified.
@@ -192,6 +303,9 @@ public:
 
     /**
      * Specifies an object to handle data or error related callbacks from the underlying API.
+     *
+     * <strong>Important: See AudioStreamCallback for restrictions on what may be called
+     * from the callback methods.</strong>
      *
      * When an error callback occurs, the associated stream will be stopped and closed in a separate thread.
      *
@@ -214,39 +328,26 @@ public:
     }
 
     /**
-     * With OpenSL ES, the optimal framesPerBurst is not known by the native code.
-     * It should be obtained from the AudioManager using this code:
-     *
-     * <pre><code>
-        // Note that this technique only works for built-in speakers and headphones.
-        AudioManager myAudioMgr = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        text = myAudioMgr.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER);
-        defaultFramesPerBurst = Integer.parseInt(text);
-        </code></pre>
-     *
-     * It can then be passed down to Oboe through JNI.
-     *
-     * AAudio will get the optimal framesPerBurst from the HAL and will ignore this value.
-     *
-     * @param defaultFramesPerBurst
-     * @return pointer to the builder so calls can be chained
-     */
-    AudioStreamBuilder *setDefaultFramesPerBurst(int32_t defaultFramesPerBurst) {
-        mDefaultFramesPerBurst = defaultFramesPerBurst;
-        return this;
-    }
-
-    int32_t getDefaultFramesPerBurst() const {
-        return mDefaultFramesPerBurst;
-    }
-
-    /**
      * Create and open a stream object based on the current settings.
+     *
+     * The caller owns the pointer to the AudioStream object.
      *
      * @param stream pointer to a variable to receive the stream address
      * @return OBOE_OK if successful or a negative error code
      */
     Result openStream(AudioStream **stream);
+
+    /**
+     * Create and open a ManagedStream object based on the current builder state.
+     *
+     * The caller must create a unique ptr, and pass by reference so it can be
+     * modified to point to an opened stream. The caller owns the unique ptr,
+     * and it will be automatically closed and deleted when going out of scope.
+     * @param stream Reference to the ManagedStream (uniqueptr) used to keep track of stream
+     * @return OBOE_OK if successful or a negative error code.
+     */
+    Result openManagedStream(ManagedStream &stream);
+
 
 protected:
 
@@ -255,13 +356,13 @@ private:
     /**
      * Create an AudioStream object. The AudioStream must be opened before use.
      *
-     * @return pointer to an AudioStream object.
+     * The caller owns the pointer.
+     *
+     * @return pointer to an AudioStream object or nullptr.
      */
     oboe::AudioStream *build();
 
     AudioApi       mAudioApi = AudioApi::Unspecified;
-
-    int32_t        mDefaultFramesPerBurst = kDefaultFramesPerBurst;
 };
 
 } // namespace oboe

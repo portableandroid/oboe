@@ -19,37 +19,47 @@
 
 #include <SLES/OpenSLES.h>
 #include <SLES/OpenSLES_Android.h>
+#include <oboe/AudioStream.h>
+#include <common/AudioClock.h>
 
 #include "common/OboeDebug.h"
 #include "oboe/AudioStreamBuilder.h"
 #include "AudioStreamOpenSLES.h"
 #include "OpenSLESUtilities.h"
 
-#ifndef NULL
-#define NULL 0
-#endif
-
-#define DEFAULT_FRAMES_PER_CALLBACK   192    // 4 msec at 48000 Hz
-#define DEFAULT_SAMPLE_RATE           48000  // very common rate for mobile audio and video
-#define DEFAULT_CHANNEL_COUNT         2      // stereo
-
 using namespace oboe;
 
 AudioStreamOpenSLES::AudioStreamOpenSLES(const AudioStreamBuilder &builder)
     : AudioStreamBuffered(builder) {
-    mSimpleBufferQueueInterface = NULL;
-    mFramesPerBurst = builder.getDefaultFramesPerBurst();
     // OpenSL ES does not support device IDs. So overwrite value from builder.
     mDeviceId = kUnspecified;
+    // OpenSL ES does not support session IDs. So overwrite value from builder.
+    mSessionId = SessionId::None;
 }
 
-AudioStreamOpenSLES::~AudioStreamOpenSLES() {
-    delete[] mCallbackBuffer;
+constexpr SLuint32  kAudioChannelCountMax = 30;
+constexpr SLuint32  SL_ANDROID_UNKNOWN_CHANNELMASK  = 0; // Matches name used internally.
+
+SLuint32 AudioStreamOpenSLES::channelCountToChannelMaskDefault(int channelCount) const {
+    if (channelCount > kAudioChannelCountMax) {
+        return SL_ANDROID_UNKNOWN_CHANNELMASK;
+    }
+
+    SLuint32 bitfield = (1 << channelCount) - 1;
+
+    // Check for OS at run-time.
+    if(getSdkVersion() >= __ANDROID_API_N__) {
+        return SL_ANDROID_MAKE_INDEXED_CHANNEL_MASK(bitfield);
+    }
+
+    // Indexed channels masks were added in N.
+    // For before N, the best we can do is use a positional channel mask.
+    return bitfield;
 }
 
 static bool s_isLittleEndian() {
     static uint32_t value = 1;
-    return *((uint8_t *) &value) == 1; // Does address point to LSB?
+    return (*reinterpret_cast<uint8_t *>(&value) == 1);  // Does address point to LSB?
 }
 
 SLuint32 AudioStreamOpenSLES::getDefaultByteOrder() {
@@ -61,22 +71,9 @@ Result AudioStreamOpenSLES::open() {
     LOGI("AudioStreamOpenSLES::open(chans:%d, rate:%d)",
                         mChannelCount, mSampleRate);
 
-    if (getSdkVersion() < __ANDROID_API_L__ && mFormat == AudioFormat::Float){
-        // TODO: Allow floating point format on API <21 using float->int16 converter
-        return Result::ErrorInvalidFormat;
-    }
-
     SLresult result = EngineOpenSLES::getInstance().open();
     if (SL_RESULT_SUCCESS != result) {
         return Result::ErrorInternal;
-    }
-
-    // If audio format is unspecified then choose a suitable default.
-    // API 21+: FLOAT
-    // API <21: INT16
-    if (mFormat == AudioFormat::Unspecified){
-        mFormat = (getSdkVersion() < __ANDROID_API_L__) ?
-                  AudioFormat::I16 : AudioFormat::Float;
     }
 
     Result oboeResult = AudioStreamBuffered::open();
@@ -85,10 +82,10 @@ Result AudioStreamOpenSLES::open() {
     }
     // Convert to defaults if UNSPECIFIED
     if (mSampleRate == kUnspecified) {
-        mSampleRate = DEFAULT_SAMPLE_RATE;
+        mSampleRate = DefaultStreamValues::SampleRate;
     }
     if (mChannelCount == kUnspecified) {
-        mChannelCount = DEFAULT_CHANNEL_COUNT;
+        mChannelCount = DefaultStreamValues::ChannelCount;
     }
 
     // Decide frames per burst based on hints from caller.
@@ -98,55 +95,178 @@ Result AudioStreamOpenSLES::open() {
     } else if (mFramesPerBurst != kUnspecified) { // set from defaultFramesPerBurst
         mFramesPerCallback = mFramesPerBurst;
     } else {
-        mFramesPerBurst = mFramesPerCallback = DEFAULT_FRAMES_PER_CALLBACK;
+        mFramesPerBurst = mFramesPerCallback = DefaultStreamValues::FramesPerBurst;
     }
 
     mBytesPerCallback = mFramesPerCallback * getBytesPerFrame();
-    delete[] mCallbackBuffer; // to prevent memory leaks
-    mCallbackBuffer = new uint8_t[mBytesPerCallback];
     LOGD("AudioStreamOpenSLES(): mFramesPerCallback = %d", mFramesPerCallback);
     LOGD("AudioStreamOpenSLES(): mBytesPerCallback = %d", mBytesPerCallback);
+    if (mBytesPerCallback <= 0) {
+        LOGE("AudioStreamOpenSLES::open() bytesPerCallback < 0, bad format?");
+        return Result::ErrorInvalidFormat; // causing bytesPerFrame == 0
+    }
+
+    mCallbackBuffer = std::make_unique<uint8_t[]>(mBytesPerCallback);
 
     mSharingMode = SharingMode::Shared;
 
     if (!usingFIFO()) {
         mBufferCapacityInFrames = mFramesPerBurst * kBufferQueueLength;
+        mBufferSizeInFrames = mBufferCapacityInFrames;
     }
 
     return Result::OK;
 }
 
+SLuint32 AudioStreamOpenSLES::convertPerformanceMode(PerformanceMode oboeMode) const {
+    SLuint32 openslMode = SL_ANDROID_PERFORMANCE_NONE;
+    switch(oboeMode) {
+        case PerformanceMode::None:
+            openslMode =  SL_ANDROID_PERFORMANCE_NONE;
+            break;
+        case PerformanceMode::LowLatency:
+            openslMode =  (getSessionId() == SessionId::None) ?  SL_ANDROID_PERFORMANCE_LATENCY : SL_ANDROID_PERFORMANCE_LATENCY_EFFECTS;
+            break;
+        case PerformanceMode::PowerSaving:
+            openslMode =  SL_ANDROID_PERFORMANCE_POWER_SAVING;
+            break;
+        default:
+            break;
+    }
+    return openslMode;
+}
+
+PerformanceMode AudioStreamOpenSLES::convertPerformanceMode(SLuint32 openslMode) const {
+    PerformanceMode oboeMode = PerformanceMode::None;
+    switch(openslMode) {
+        case SL_ANDROID_PERFORMANCE_NONE:
+            oboeMode =  PerformanceMode::None;
+            break;
+        case SL_ANDROID_PERFORMANCE_LATENCY:
+        case SL_ANDROID_PERFORMANCE_LATENCY_EFFECTS:
+            oboeMode =  PerformanceMode::LowLatency;
+            break;
+        case SL_ANDROID_PERFORMANCE_POWER_SAVING:
+            oboeMode =  PerformanceMode::PowerSaving;
+            break;
+        default:
+            break;
+    }
+    return oboeMode;
+}
+
+SLresult AudioStreamOpenSLES::configurePerformanceMode(SLAndroidConfigurationItf configItf) {
+
+    if (configItf == nullptr) {
+        LOGW("%s() called with NULL configuration", __func__);
+        mPerformanceMode = PerformanceMode::None;
+        return SL_RESULT_INTERNAL_ERROR;
+    }
+    if (getSdkVersion() < __ANDROID_API_N_MR1__) {
+        LOGW("%s() not supported until N_MR1", __func__);
+        mPerformanceMode = PerformanceMode::None;
+        return SL_RESULT_SUCCESS;
+    }
+
+    SLresult result = SL_RESULT_SUCCESS;
+    SLuint32 performanceMode = convertPerformanceMode(getPerformanceMode());
+    LOGD("SetConfiguration(SL_ANDROID_KEY_PERFORMANCE_MODE, SL %u) called", performanceMode);
+    result = (*configItf)->SetConfiguration(configItf, SL_ANDROID_KEY_PERFORMANCE_MODE,
+                                                     &performanceMode, sizeof(performanceMode));
+    if (SL_RESULT_SUCCESS != result) {
+        LOGW("SetConfiguration(PERFORMANCE_MODE, SL %u) returned %s",
+             performanceMode, getSLErrStr(result));
+        mPerformanceMode = PerformanceMode::None;
+    }
+
+    return result;
+}
+
+SLresult AudioStreamOpenSLES::updateStreamParameters(SLAndroidConfigurationItf configItf) {
+    SLresult result = SL_RESULT_SUCCESS;
+    if(getSdkVersion() >= __ANDROID_API_N_MR1__ && configItf != nullptr) {
+        SLuint32 performanceMode = 0;
+        SLuint32 performanceModeSize = sizeof(performanceMode);
+        result = (*configItf)->GetConfiguration(configItf, SL_ANDROID_KEY_PERFORMANCE_MODE,
+                                                &performanceModeSize, &performanceMode);
+        // A bug in GetConfiguration() before P caused a wrong result code to be returned.
+        if (getSdkVersion() <= __ANDROID_API_O_MR1__) {
+            result = SL_RESULT_SUCCESS; // Ignore actual result before P.
+        }
+
+        if (SL_RESULT_SUCCESS != result) {
+            LOGW("GetConfiguration(SL_ANDROID_KEY_PERFORMANCE_MODE) returned %d", result);
+            mPerformanceMode = PerformanceMode::None; // If we can't query it then assume None.
+        } else {
+            mPerformanceMode = convertPerformanceMode(performanceMode); // convert SL to Oboe mode
+        }
+    } else {
+        mPerformanceMode = PerformanceMode::None; // If we can't query it then assume None.
+    }
+    return result;
+}
+
 Result AudioStreamOpenSLES::close() {
+    if (mState == StreamState::Closed) {
+        return Result::ErrorClosed;
+    }
+
+    AudioStreamBuffered::close();
+
+    onBeforeDestroy();
+
     if (mObjectInterface != nullptr) {
         (*mObjectInterface)->Destroy(mObjectInterface);
         mObjectInterface = nullptr;
-
     }
+
+    onAfterDestroy();
+
     mSimpleBufferQueueInterface = nullptr;
     EngineOpenSLES::getInstance().close();
+
+    setState(StreamState::Closed);
     return Result::OK;
 }
 
 SLresult AudioStreamOpenSLES::enqueueCallbackBuffer(SLAndroidSimpleBufferQueueItf bq) {
-    return (*bq)->Enqueue(bq, mCallbackBuffer, mBytesPerCallback);
+    return (*bq)->Enqueue(bq, mCallbackBuffer.get(), mBytesPerCallback);
 }
 
-SLresult AudioStreamOpenSLES::processBufferCallback(SLAndroidSimpleBufferQueueItf bq) {
+void AudioStreamOpenSLES::processBufferCallback(SLAndroidSimpleBufferQueueItf bq) {
+    bool stopStream = false;
     // Ask the callback to fill the output buffer with data.
-    DataCallbackResult result = fireCallback(mCallbackBuffer, mFramesPerCallback);
-    if (result != DataCallbackResult::Continue) {
-        LOGE("Oboe callback returned %d", result);
-        return SL_RESULT_INTERNAL_ERROR; // TODO How should we stop OpenSL ES.
-    } else {
+    DataCallbackResult result = fireDataCallback(mCallbackBuffer.get(), mFramesPerCallback);
+    if (result == DataCallbackResult::Continue) {
+        // Update Oboe service position based on OpenSL ES position.
         updateServiceFrameCounter();
+        // Update Oboe client position with frames handled by the callback.
+        if (getDirection() == Direction::Input) {
+            mFramesRead += mFramesPerCallback;
+        } else {
+            mFramesWritten += mFramesPerCallback;
+        }
         // Pass the data to OpenSLES.
-        return enqueueCallbackBuffer(bq);
+        SLresult enqueueResult = enqueueCallbackBuffer(bq);
+        if (enqueueResult != SL_RESULT_SUCCESS) {
+            LOGE("enqueueCallbackBuffer() returned %d", enqueueResult);
+            stopStream = true;
+        }
+    } else if (result == DataCallbackResult::Stop) {
+        LOGD("Oboe callback returned Stop");
+        stopStream = true;
+    } else {
+        LOGW("Oboe callback returned unexpected value = %d", result);
+        stopStream = true;
+    }
+    if (stopStream) {
+        requestStop();
     }
 }
 
 // this callback handler is called every time a buffer needs processing
 static void bqCallbackGlue(SLAndroidSimpleBufferQueueItf bq, void *context) {
-    ((AudioStreamOpenSLES *) context)->processBufferCallback(bq);
+    (reinterpret_cast<AudioStreamOpenSLES *>(context))->processBufferCallback(bq);
 }
 
 SLresult AudioStreamOpenSLES::registerBufferQueueCallback() {
@@ -176,4 +296,36 @@ int64_t AudioStreamOpenSLES::getFramesProcessedByServer() const {
     int64_t millis64 = mPositionMillis.get();
     int64_t framesProcessed = millis64 * getSampleRate() / kMillisPerSecond;
     return framesProcessed;
+}
+
+Result AudioStreamOpenSLES::waitForStateChange(StreamState currentState,
+                                                     StreamState *nextState,
+                                                     int64_t timeoutNanoseconds) {
+    Result oboeResult = Result::ErrorTimeout;
+    int64_t sleepTimeNanos = 20 * kNanosPerMillisecond; // arbitrary
+    int64_t timeLeftNanos = timeoutNanoseconds;
+
+    while (true) {
+        const StreamState state = getState(); // this does not require a lock
+        if (nextState != nullptr) {
+            *nextState = state;
+        }
+        if (currentState != state) { // state changed?
+            oboeResult = Result::OK;
+            break;
+        }
+
+        // Did we timeout or did user ask for non-blocking?
+        if (timeoutNanoseconds <= 0) {
+            break;
+        }
+
+        if (sleepTimeNanos > timeLeftNanos){
+            sleepTimeNanos = timeLeftNanos;
+        }
+        AudioClock::sleepForNanos(sleepTimeNanos);
+        timeLeftNanos -= sleepTimeNanos;
+    }
+
+    return oboeResult;
 }

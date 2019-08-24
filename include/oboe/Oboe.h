@@ -17,13 +17,21 @@
 #ifndef OBOE_OBOE_H
 #define OBOE_OBOE_H
 
+/**
+ * \mainpage API reference
+ *
+ * All documentation is found in the <a href="namespaceoboe.html">oboe namespace section</a>
+ *
+ */
+
 #include "oboe/Definitions.h"
-#include "oboe/ErrorOrValue.h"
+#include "oboe/ResultWithValue.h"
 #include "oboe/LatencyTuner.h"
 #include "oboe/AudioStream.h"
 #include "oboe/AudioStreamBase.h"
 #include "oboe/AudioStreamBuilder.h"
 #include "oboe/Utilities.h"
 #include "oboe/Version.h"
+#include "oboe/StabilizedCallback.h"
 
 #endif //OBOE_OBOE_H
