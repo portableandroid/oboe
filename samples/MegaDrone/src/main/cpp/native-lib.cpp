@@ -21,20 +21,18 @@
 #include "MegaDroneEngine.h"
 
 
-std::vector<int> convertJavaArrayToVector(JNIEnv *env, jintArray intArray){
-
+std::vector<int> convertJavaArrayToVector(JNIEnv *env, jintArray intArray) {
     std::vector<int> v;
     jsize length = env->GetArrayLength(intArray);
-
     if (length > 0) {
-        jboolean isCopy;
-        jint *elements = env->GetIntArrayElements(intArray, &isCopy);
-        for (int i = 0; i < length; i++) {
-            v.push_back(elements[i]);
-        }
+        jint *elements = env->GetIntArrayElements(intArray, nullptr);
+        v.insert(v.end(), &elements[0], &elements[length]);
+        // Unpin the memory for the array, or free the copy.
+        env->ReleaseIntArrayElements(intArray, elements, 0);
     }
     return v;
 }
+
 extern "C" {
 /**
  * Start the audio engine
@@ -45,20 +43,28 @@ extern "C" {
  * @return a pointer to the audio engine. This should be passed to other methods
  */
 JNIEXPORT jlong JNICALL
-Java_com_example_oboe_megadrone_MainActivity_startEngine(JNIEnv *env, jobject /*unused*/,
+Java_com_google_oboe_samples_megadrone_MainActivity_startEngine(JNIEnv *env, jobject /*unused*/,
                                                          jintArray jCpuIds) {
     std::vector<int> cpuIds = convertJavaArrayToVector(env, jCpuIds);
     LOGD("cpu ids size: %d", static_cast<int>(cpuIds.size()));
     MegaDroneEngine  *engine = new MegaDroneEngine(std::move(cpuIds));
-    LOGD("Engine Started");
+
+    if (!engine->start()) {
+        LOGE("Failed to start MegaDrone Engine");
+        delete engine;
+        engine = nullptr;
+    } else  {
+        LOGD("Engine Started");
+    }
     return reinterpret_cast<jlong>(engine);
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_oboe_megadrone_MainActivity_stopEngine(JNIEnv *env, jobject instance,
+Java_com_google_oboe_samples_megadrone_MainActivity_stopEngine(JNIEnv *env, jobject instance,
         jlong jEngineHandle) {
     auto engine = reinterpret_cast<MegaDroneEngine*>(jEngineHandle);
     if (engine) {
+        engine->stop();
         delete engine;
     } else {
         LOGD("Engine invalid, call startEngine() to create");
@@ -67,7 +73,7 @@ Java_com_example_oboe_megadrone_MainActivity_stopEngine(JNIEnv *env, jobject ins
 
 
 JNIEXPORT void JNICALL
-Java_com_example_oboe_megadrone_MainActivity_tap(JNIEnv *env, jobject instance,
+Java_com_google_oboe_samples_megadrone_MainActivity_tap(JNIEnv *env, jobject instance,
         jlong jEngineHandle, jboolean isDown) {
 
     auto *engine = reinterpret_cast<MegaDroneEngine*>(jEngineHandle);
@@ -79,7 +85,7 @@ Java_com_example_oboe_megadrone_MainActivity_tap(JNIEnv *env, jobject instance,
 }
 
 JNIEXPORT void JNICALL
-Java_com_example_oboe_megadrone_MainActivity_native_1setDefaultStreamValues(JNIEnv *env,
+Java_com_google_oboe_samples_megadrone_MainActivity_native_1setDefaultStreamValues(JNIEnv *env,
                                                                             jclass type,
                                                                             jint sampleRate,
                                                                             jint framesPerBurst) {

@@ -4,10 +4,16 @@ OboeTester is an app that can be used to test many of the features of Oboe, AAud
 It can also be used to test Android devices, measure latency and glitches, etc.
 
 OboeTester can be run as an interactive app.
-It can also be run as part of an [automated test using Intents](docs/AutomatedTesting.md)
+It can also be run as part of an [automated test using Intents](AutomatedTesting.md)
 
-## [How to Build OboeTester](Build.md)
+## Install OboeTester
+
+You have two options:
+1) Download OboeTester from [Play Store](https://play.google.com/store/apps/details?id=com.mobileer.oboetester)
+2) OR [Build latest OboeTester using Android Studio](Build.md)
 
 ## [How to Use OboeTester Interactively](Usage.md)
 
 ## [Automated Testing with OboeTester](AutomatedTesting.md)
+
+-- [Privacy Policy](PrivacyPolicy.md) --

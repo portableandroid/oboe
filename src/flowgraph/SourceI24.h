@@ -20,20 +20,24 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#include "AudioProcessorBase.h"
+#include "FlowGraphNode.h"
 
-namespace flowgraph {
+namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph {
 
 /**
  * AudioSource that reads a block of pre-defined 24-bit packed integer data.
  */
-class SourceI24 : public AudioSource {
+class SourceI24 : public FlowGraphSourceBuffered {
 public:
     explicit SourceI24(int32_t channelCount);
 
     int32_t onProcess(int32_t numFrames) override;
+
+    const char *getName() override {
+        return "SourceI24";
+    }
 };
 
-} /* namespace flowgraph */
+} /* namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph */
 
 #endif //FLOWGRAPH_SOURCE_I24_H

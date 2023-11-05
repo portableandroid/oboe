@@ -42,6 +42,7 @@ constexpr int64_t kDefaultTimeoutNanos = (2000 * kNanosPerMillisecond);
  * Base class for Oboe C++ audio stream.
  */
 class AudioStream : public AudioStreamBase {
+    friend class AudioStreamBuilder; // allow access to setWeakThis() and lockWeakThis()
 public:
 
     AudioStream() {}
@@ -65,6 +66,29 @@ public:
      */
     virtual Result open() {
         return Result::OK; // Called by subclasses. Might do more in the future.
+    }
+
+    /**
+     * Free the audio resources associated with a stream created by AAudioStreamBuilder_openStream().
+     *
+     * AAudioStream_close() should be called at some point after calling this function.
+     *
+     * After this call, the stream will be in AAUDIO_STREAM_STATE_CLOSING
+     *
+     * This function is useful if you want to release the audio resources immediately, but still allow
+     * queries to the stream to occur from other threads. This often happens if you are monitoring
+     * stream progress from a UI thread.
+     *
+     * NOTE: This function is only fully implemented for MMAP streams, which are low latency streams
+     * supported by some devices. On other "Legacy" streams some audio resources will still be in use
+     * and some callbacks may still be in process after this call.
+     *
+     * Available in AAudio since API level 30. Returns Result::ErrorUnimplemented otherwise.
+     *
+     * * @return either Result::OK or an error.
+     */
+    virtual Result release() {
+        return Result::ErrorUnimplemented;
     }
 
     /**
@@ -129,7 +153,7 @@ public:
      *
      * @return state or a negative error.
      */
-    virtual StreamState getState() const = 0;
+    virtual StreamState getState() = 0;
 
     /**
      * Wait until the stream's current state no longer matches the input state.
@@ -190,7 +214,7 @@ public:
      * @return a result which is either Result::OK with the xRun count as the value, or a
      * Result::Error* code
      */
-    virtual ResultWithValue<int32_t> getXRunCount() const {
+    virtual ResultWithValue<int32_t> getXRunCount() {
         return ResultWithValue<int32_t>(Result::ErrorUnimplemented);
     }
 
@@ -204,7 +228,9 @@ public:
      *
      * @return burst size
      */
-    virtual int32_t getFramesPerBurst() = 0;
+    int32_t getFramesPerBurst() const {
+        return mFramesPerBurst;
+    }
 
     /**
      * Get the number of bytes in each audio frame. This is calculated using the channel count
@@ -259,6 +285,10 @@ public:
      * The latency of an OUTPUT stream is generally higher than the INPUT latency
      * because an app generally tries to keep the OUTPUT buffer full and the INPUT buffer empty.
      *
+     * Note that due to issues in Android before R, we recommend NOT calling
+     * this method from a data callback. See this tech note for more details.
+     * https://github.com/google/oboe/wiki/TechNote_ReleaseBuffer
+     *
      * @return a ResultWithValue which has a result of Result::OK and a value containing the latency
      * in milliseconds, or a result of Result::Error*.
      */
@@ -276,6 +306,10 @@ public:
      *
      * The time is based on the implementation's best effort, using whatever knowledge is available
      * to the system, but cannot account for any delay unknown to the implementation.
+     *
+     * Note that due to issues in Android before R, we recommend NOT calling
+     * this method from a data callback. See this tech note for more details.
+     * https://github.com/google/oboe/wiki/TechNote_ReleaseBuffer
      *
      * @deprecated since 1.0, use AudioStream::getTimestamp(clockid_t clockId) instead, which
      * returns ResultWithValue
@@ -300,13 +334,16 @@ public:
      * The time is based on the implementation's best effort, using whatever knowledge is available
      * to the system, but cannot account for any delay unknown to the implementation.
      *
+     * Note that due to issues in Android before R, we recommend NOT calling
+     * this method from a data callback. See this tech note for more details.
+     * https://github.com/google/oboe/wiki/TechNote_ReleaseBuffer
+     *
+     * See 
      * @param clockId the type of clock to use e.g. CLOCK_MONOTONIC
      * @return a FrameTimestamp containing the position and time at which a particular audio frame
      * entered or left the audio processing pipeline, or an error if the operation failed.
      */
-	virtual ResultWithValue<FrameTimestamp> getTimestamp(clockid_t /* clockId */){
-        return Result::ErrorUnimplemented;
-    }
+    virtual ResultWithValue<FrameTimestamp> getTimestamp(clockid_t /* clockId */);
 
     // ============== I/O ===========================
     /**
@@ -374,9 +411,131 @@ public:
     }
 
     /**
-     * Launch a thread that will stop the stream.
+     * Update mFramesWritten.
+     * For internal use only.
      */
-    void launchStopThread();
+    virtual void updateFramesWritten() = 0;
+
+    /**
+     * Update mFramesRead.
+     * For internal use only.
+     */
+    virtual void updateFramesRead() = 0;
+
+    /*
+     * Swap old callback for new callback.
+     * This not atomic.
+     * This should only be used internally.
+     * @param dataCallback
+     * @return previous dataCallback
+     */
+    AudioStreamDataCallback *swapDataCallback(AudioStreamDataCallback *dataCallback) {
+        AudioStreamDataCallback *previousCallback = mDataCallback;
+        mDataCallback = dataCallback;
+        return previousCallback;
+    }
+
+    /*
+     * Swap old callback for new callback.
+     * This not atomic.
+     * This should only be used internally.
+     * @param errorCallback
+     * @return previous errorCallback
+     */
+    AudioStreamErrorCallback *swapErrorCallback(AudioStreamErrorCallback *errorCallback) {
+        AudioStreamErrorCallback *previousCallback = mErrorCallback;
+        mErrorCallback = errorCallback;
+        return previousCallback;
+    }
+
+    /**
+     * @return number of frames of data currently in the buffer
+     */
+    ResultWithValue<int32_t> getAvailableFrames();
+
+    /**
+     * Wait until the stream has a minimum amount of data available in its buffer.
+     * This can be used with an EXCLUSIVE MMAP input stream to avoid reading data too close to
+     * the DSP write position, which may cause glitches.
+     *
+     * Starting with Oboe 1.7.1, the numFrames will be clipped internally against the
+     * BufferCapacity minus BurstSize. This is to prevent trying to wait for more frames
+     * than could possibly be available. In this case, the return value may be less than numFrames.
+     * Note that there may still be glitching if numFrames is too high.
+     *
+     * @param numFrames requested minimum frames available
+     * @param timeoutNanoseconds
+     * @return number of frames available, ErrorTimeout
+     */
+    ResultWithValue<int32_t> waitForAvailableFrames(int32_t numFrames,
+                                                    int64_t timeoutNanoseconds);
+
+    /**
+     * @return last result passed from an error callback
+     */
+    virtual oboe::Result getLastErrorCallbackResult() const {
+        return mErrorCallbackResult;
+    }
+
+
+    int32_t getDelayBeforeCloseMillis() const {
+        return mDelayBeforeCloseMillis;
+    }
+
+    /**
+     * Set the time to sleep before closing the internal stream.
+     *
+     * Sometimes a callback can occur shortly after a stream has been stopped and
+     * even after a close! If the stream has been closed then the callback
+     * might access memory that has been freed, which could cause a crash.
+     * This seems to be more likely in Android P or earlier.
+     * But it can also occur in later versions. By sleeping, we give time for
+     * the callback threads to finish.
+     *
+     * Note that this only has an effect when OboeGlobals::areWorkaroundsEnabled() is true.
+     *
+     * @param delayBeforeCloseMillis time to sleep before close.
+     */
+    void setDelayBeforeCloseMillis(int32_t delayBeforeCloseMillis) {
+        mDelayBeforeCloseMillis = delayBeforeCloseMillis;
+    }
+
+    /**
+     * Enable or disable a device specific CPU performance hint.
+     * Runtime benchmarks such as the callback duration may be used to
+     * speed up the CPU and improve real-time performance.
+     *
+     * Note that this feature is device specific and may not be implemented.
+     * Also the benefits may vary by device.
+     *
+     * The flag will be checked in the Oboe data callback. If it transitions from false to true
+     * then the PerformanceHint feature will be started.
+     * This only needs to be called once.
+     *
+     * You may want to enable this if you have a dynamically changing workload
+     * and you notice that you are getting underruns and glitches when your workload increases.
+     * This might happen, for example, if you suddenly go from playing one note to
+     * ten notes on a synthesizer.
+     *
+     * Try the CPU Load test in OboeTester if you would like to experiment with this interactively.
+     *
+     * On some devices, this may be implemented using the "ADPF" library.
+     *
+     * @param enabled true if you would like a performance boost
+     */
+    void setPerformanceHintEnabled(bool enabled) {
+        mPerformanceHintEnabled = enabled;
+    }
+
+    /**
+     * This only tells you if the feature has been requested.
+     * It does not tell you if the PerformanceHint feature is implemented or active on the device.
+     *
+     * @return true if set using setPerformanceHintEnabled().
+     */
+    bool isPerformanceHintEnabled() {
+        return mPerformanceHintEnabled;
+    }
 
 protected:
 
@@ -425,16 +584,6 @@ protected:
     DataCallbackResult fireDataCallback(void *audioData, int numFrames);
 
     /**
-     * Update mFramesWritten.
-     */
-    virtual void updateFramesWritten() = 0;
-
-    /**
-     * Update mFramesRead.
-     */
-    virtual void updateFramesRead() = 0;
-
-    /**
      * @return true if callbacks may be called
      */
     bool isDataCallbackEnabled() {
@@ -448,6 +597,54 @@ protected:
     void setDataCallbackEnabled(bool enabled) {
         mDataCallbackEnabled = enabled;
     }
+
+    /**
+     * This should only be called as a stream is being opened.
+     * Otherwise we might override setDelayBeforeCloseMillis().
+     */
+    void calculateDefaultDelayBeforeCloseMillis();
+
+    /**
+     * Try to avoid a race condition when closing.
+     */
+    void sleepBeforeClose() {
+        if (mDelayBeforeCloseMillis > 0) {
+            usleep(mDelayBeforeCloseMillis * 1000);
+        }
+    }
+
+    /**
+     * This may be called internally at the beginning of a callback.
+     */
+    virtual void beginPerformanceHintInCallback() {}
+
+    /**
+     * This may be called internally at the end of a callback.
+     * @param numFrames passed to the callback
+     */
+    virtual void endPerformanceHintInCallback(int32_t numFrames) {}
+
+    /**
+     * This will be called when the stream is closed just in case performance hints were enabled.
+     */
+    virtual void closePerformanceHint() {}
+
+    /*
+     * Set a weak_ptr to this stream from the shared_ptr so that we can
+     * later use a shared_ptr in the error callback.
+     */
+    void setWeakThis(std::shared_ptr<oboe::AudioStream> &sharedStream) {
+        mWeakThis = sharedStream;
+    }
+
+    /*
+     * Make a shared_ptr that will prevent this stream from being deleted.
+     */
+    std::shared_ptr<oboe::AudioStream> lockWeakThis() {
+        return mWeakThis.lock();
+    }
+
+    std::weak_ptr<AudioStream> mWeakThis; // weak pointer to this object
 
     /**
      * Number of frames which have been written into the stream
@@ -467,16 +664,33 @@ protected:
 
     std::mutex           mLock; // for synchronizing start/stop/close
 
+    oboe::Result         mErrorCallbackResult = oboe::Result::OK;
+
+    /**
+     * Number of frames which will be copied to/from the audio device in a single read/write
+     * operation
+     */
+    int32_t              mFramesPerBurst = kUnspecified;
+
+    // Time to sleep in order to prevent a race condition with a callback after a close().
+    // Two milliseconds may be enough but 10 msec is even safer.
+    static constexpr int kMinDelayBeforeCloseMillis = 10;
+    int32_t              mDelayBeforeCloseMillis = kMinDelayBeforeCloseMillis;
+
 private:
+
+    // Log the scheduler if it changes.
+    void                 checkScheduler();
     int                  mPreviousScheduler = -1;
 
     std::atomic<bool>    mDataCallbackEnabled{false};
     std::atomic<bool>    mErrorCallbackCalled{false};
 
+    std::atomic<bool>    mPerformanceHintEnabled{false}; // set only by app
 };
 
 /**
- * This struct is a stateless functor which closes a audiostream prior to its deletion.
+ * This struct is a stateless functor which closes an AudioStream prior to its deletion.
  * This means it can be used to safely delete a smart pointer referring to an open stream.
  */
     struct StreamDeleterFunctor {

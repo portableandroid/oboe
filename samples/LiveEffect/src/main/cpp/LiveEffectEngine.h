@@ -24,48 +24,60 @@
 #include "FullDuplexPass.h"
 
 class LiveEffectEngine : public oboe::AudioStreamCallback {
-   public:
+public:
     LiveEffectEngine();
-    ~LiveEffectEngine();
+
     void setRecordingDeviceId(int32_t deviceId);
     void setPlaybackDeviceId(int32_t deviceId);
-    void setEffectOn(bool isOn);
-    void openStreams();
+
+    /**
+     * @param isOn
+     * @return true if it succeeds
+     */
+    bool setEffectOn(bool isOn);
 
     /*
-     * oboe::AudioStreamCallback interface implementation
+     * oboe::AudioStreamDataCallback interface implementation
      */
     oboe::DataCallbackResult onAudioReady(oboe::AudioStream *oboeStream,
-                                          void *audioData, int32_t numFrames);
-    void onErrorBeforeClose(oboe::AudioStream *oboeStream, oboe::Result error);
-    void onErrorAfterClose(oboe::AudioStream *oboeStream, oboe::Result error);
+                                          void *audioData, int32_t numFrames) override;
+
+    /*
+     * oboe::AudioStreamErrorCallback interface implementation
+     */
+    void onErrorBeforeClose(oboe::AudioStream *oboeStream, oboe::Result error) override;
+    void onErrorAfterClose(oboe::AudioStream *oboeStream, oboe::Result error) override;
 
     bool setAudioApi(oboe::AudioApi);
-    bool isAAudioSupported(void);
+    bool isAAudioRecommended(void);
 
-   private:
-    FullDuplexPass mFullDuplexPass;
-    bool mIsEffectOn = false;
-    int32_t mRecordingDeviceId = oboe::kUnspecified;
-    int32_t mPlaybackDeviceId = oboe::kUnspecified;
-    oboe::AudioFormat mFormat = oboe::AudioFormat::I16;
-    int32_t mSampleRate = oboe::kUnspecified;
-    int32_t mInputChannelCount = oboe::ChannelCount::Stereo;
-    int32_t mOutputChannelCount = oboe::ChannelCount::Stereo;
-    oboe::AudioStream *mRecordingStream = nullptr;
-    oboe::AudioStream *mPlayStream = nullptr;
-    oboe::AudioApi mAudioApi = oboe::AudioApi::AAudio;
+private:
+    FullDuplexPass    mFullDuplexPass;
+    bool              mIsEffectOn = false;
+    int32_t           mRecordingDeviceId = oboe::kUnspecified;
+    int32_t           mPlaybackDeviceId = oboe::kUnspecified;
+    const oboe::AudioFormat mFormat = oboe::AudioFormat::Float; // for easier processing
+    oboe::AudioApi    mAudioApi = oboe::AudioApi::AAudio;
+    int32_t           mSampleRate = oboe::kUnspecified;
+    const int32_t     mInputChannelCount = oboe::ChannelCount::Stereo;
+    const int32_t     mOutputChannelCount = oboe::ChannelCount::Stereo;
 
-    void closeStream(oboe::AudioStream *stream);
+    std::shared_ptr<oboe::AudioStream> mRecordingStream;
+    std::shared_ptr<oboe::AudioStream> mPlayStream;
 
+    oboe::Result openStreams();
+
+    void closeStreams();
+
+    void closeStream(std::shared_ptr<oboe::AudioStream> &stream);
 
     oboe::AudioStreamBuilder *setupCommonStreamParameters(
         oboe::AudioStreamBuilder *builder);
     oboe::AudioStreamBuilder *setupRecordingStreamParameters(
-        oboe::AudioStreamBuilder *builder);
+        oboe::AudioStreamBuilder *builder, int32_t sampleRate);
     oboe::AudioStreamBuilder *setupPlaybackStreamParameters(
         oboe::AudioStreamBuilder *builder);
-    void warnIfNotLowLatency(oboe::AudioStream *stream);
+    void warnIfNotLowLatency(std::shared_ptr<oboe::AudioStream> &stream);
 };
 
 #endif  // OBOE_LIVEEFFECTENGINE_H

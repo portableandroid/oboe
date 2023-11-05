@@ -21,12 +21,14 @@
 #include <sys/types.h>
 #include <vector>
 
-#include "AudioProcessorBase.h"
+#include "FlowGraphNode.h"
+
+namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph {
 
 /**
  * Combine multiple mono inputs into one interleaved multi-channel output.
  */
-class ManyToMultiConverter : public flowgraph::AudioProcessorBase {
+class ManyToMultiConverter : public flowgraph::FlowGraphNode {
 public:
     explicit ManyToMultiConverter(int32_t channelCount);
 
@@ -34,12 +36,18 @@ public:
 
     int32_t onProcess(int numFrames) override;
 
-    void setEnabled(bool enabled) {}
+    void setEnabled(bool /*enabled*/) {}
 
-    std::vector<std::unique_ptr<flowgraph::AudioFloatInputPort>> inputs;
-    flowgraph::AudioFloatOutputPort output;
+    std::vector<std::unique_ptr<flowgraph::FlowGraphPortFloatInput>> inputs;
+    flowgraph::FlowGraphPortFloatOutput output;
+
+    const char *getName() override {
+        return "ManyToMultiConverter";
+    }
 
 private:
 };
+
+} /* namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph */
 
 #endif //FLOWGRAPH_MANY_TO_MULTI_CONVERTER_H

@@ -60,6 +60,15 @@ int32_t convertFormatToSizeInBytes(AudioFormat format) {
         case AudioFormat::Float:
             size = sizeof(float);
             break;
+        case AudioFormat::I24:
+            size = 3; // packed 24-bit data
+            break;
+        case AudioFormat::I32:
+            size = sizeof(int32_t);
+            break;
+        case AudioFormat::IEC61937:
+            size = sizeof(int16_t);
+            break;
         default:
             break;
     }
@@ -98,6 +107,9 @@ const char *convertToText<AudioFormat>(AudioFormat format) {
         case AudioFormat::Unspecified:  return "Unspecified";
         case AudioFormat::I16:          return "I16";
         case AudioFormat::Float:        return "Float";
+        case AudioFormat::I24:          return "I24";
+        case AudioFormat::I32:          return "I32";
+        case AudioFormat::IEC61937:     return "IEC61937";
         default:                        return "Unrecognized format";
     }
 }
@@ -183,7 +195,7 @@ const char *convertToText<AudioStream*>(AudioStream* stream) {
      <<"BufferCapacity: "<<stream->getBufferCapacityInFrames()<<std::endl
      <<"BufferSize: "<<stream->getBufferSizeInFrames()<<std::endl
      <<"FramesPerBurst: "<< stream->getFramesPerBurst()<<std::endl
-     <<"FramesPerCallback: "<<stream->getFramesPerCallback()<<std::endl
+     <<"FramesPerDataCallback: "<<stream->getFramesPerDataCallback()<<std::endl
      <<"SampleRate: "<<stream->getSampleRate()<<std::endl
      <<"ChannelCount: "<<stream->getChannelCount()<<std::endl
      <<"Format: "<<oboe::convertToText(stream->getFormat())<<std::endl
@@ -266,18 +278,56 @@ const char *convertToText<ChannelCount>(ChannelCount channelCount) {
     }
 }
 
-int getSdkVersion() {
+std::string getPropertyString(const char * name) {
+    std::string result;
 #ifdef __ANDROID__
-    static int sCachedSdkVersion = -1;
-    if (sCachedSdkVersion == -1) {
-        char sdk[PROP_VALUE_MAX] = {0};
-        if (__system_property_get("ro.build.version.sdk", sdk) != 0) {
-            sCachedSdkVersion = atoi(sdk);
-        }
+    char valueText[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, valueText) != 0) {
+        result = valueText;
     }
-    return sCachedSdkVersion;
+#else
+    (void) name;
 #endif
-    return -1;
+    return result;
+}
+
+int getPropertyInteger(const char * name, int defaultValue) {
+    int result = defaultValue;
+#ifdef __ANDROID__
+    char valueText[PROP_VALUE_MAX] = {0};
+    if (__system_property_get(name, valueText) != 0) {
+        result = atoi(valueText);
+    }
+#else
+    (void) name;
+#endif
+    return result;
+}
+
+int getSdkVersion() {
+    static int sCachedSdkVersion = -1;
+#ifdef __ANDROID__
+    if (sCachedSdkVersion == -1) {
+        sCachedSdkVersion = getPropertyInteger("ro.build.version.sdk", -1);
+    }
+#endif
+    return sCachedSdkVersion;
+}
+
+bool isAtLeastPreReleaseCodename(const std::string& codename) {
+    std::string buildCodename = getPropertyString("ro.build.version.codename");
+    // Special case "REL", which means the build is not a pre-release build.
+    if ("REL" == buildCodename) {
+        return false;
+    }
+
+    // Otherwise lexically compare them. Return true if the build codename is equal to or
+    // greater than the requested codename.
+    return buildCodename.compare(codename) >= 0;
+}
+
+int getChannelCountFromChannelMask(ChannelMask channelMask) {
+    return __builtin_popcount(static_cast<uint32_t>(channelMask));
 }
 
 }// namespace oboe

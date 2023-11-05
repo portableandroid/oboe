@@ -21,7 +21,7 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#include "flowgraph/AudioProcessorBase.h"
+#include "flowgraph/FlowGraphNode.h"
 #include "flowunits/OscillatorBase.h"
 
 class SawPingGenerator : public OscillatorBase {
@@ -32,7 +32,9 @@ public:
 
     int32_t onProcess(int numFrames) override;
 
-    void setEnabled(bool enabled);
+    void trigger();
+
+    void reset() override;
 
 private:
     std::atomic<int> mRequestCount; // external thread increments this to request a beep

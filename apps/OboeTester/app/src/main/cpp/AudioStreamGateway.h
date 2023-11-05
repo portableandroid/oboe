@@ -19,22 +19,22 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#include "flowgraph/AudioProcessorBase.h"
+#include "flowgraph/FlowGraphNode.h"
 #include "oboe/Oboe.h"
+#include "OboeTesterStreamCallback.h"
 
-using namespace flowgraph;
+using namespace oboe::flowgraph;
 
 /**
  * Bridge between an audio flowgraph and an audio device.
  * Pass in an AudioSink and then pass
  * this object to the AudioStreamBuilder as a callback.
  */
-class AudioStreamGateway : public oboe::AudioStreamCallback {
+class AudioStreamGateway : public OboeTesterStreamCallback {
 public:
-//    AudioStreamGateway(int samplesPerFrame);
     virtual ~AudioStreamGateway() = default;
 
-    void setAudioSink(std::shared_ptr<flowgraph::AudioSink>  sink) {
+    void setAudioSink(std::shared_ptr<oboe::flowgraph::FlowGraphSink>  sink) {
         mAudioSink = sink;
     }
 
@@ -46,16 +46,9 @@ public:
             void *audioData,
             int numFrames) override;
 
-    int getScheduler();
-
 private:
-    // Use a static position so that it will monotonically increase.
-    // Note only one gateway can be used.
-    // TODO remove single gateway limitation. Add Graph class.
-    static int64_t mFramePosition;
-    bool     mSchedulerChecked = false;
-    int      mScheduler;
-    std::shared_ptr<flowgraph::AudioSink>  mAudioSink;
+
+    std::shared_ptr<oboe::flowgraph::FlowGraphSink>  mAudioSink;
 };
 
 

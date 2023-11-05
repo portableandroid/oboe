@@ -17,8 +17,8 @@
 #ifndef NATIVEOBOE_NATIVEAUDIOCONTEXT_H
 #define NATIVEOBOE_NATIVEAUDIOCONTEXT_H
 
-#include <dlfcn.h>
 #include <jni.h>
+#include <sys/system_properties.h>
 #include <thread>
 #include <unordered_map>
 #include <vector>
@@ -26,22 +26,32 @@
 #include "common/OboeDebug.h"
 #include "oboe/Oboe.h"
 
+#include "aaudio/AAudioExtensions.h"
 #include "AudioStreamGateway.h"
+
 #include "flowunits/ImpulseOscillator.h"
 #include "flowgraph/ManyToMultiConverter.h"
 #include "flowgraph/MonoToMultiConverter.h"
+#include "flowgraph/RampLinear.h"
 #include "flowgraph/SinkFloat.h"
 #include "flowgraph/SinkI16.h"
+#include "flowgraph/SinkI24.h"
+#include "flowgraph/SinkI32.h"
+#include "flowunits/ExponentialShape.h"
+#include "flowunits/LinearShape.h"
 #include "flowunits/SineOscillator.h"
 #include "flowunits/SawtoothOscillator.h"
+#include "flowunits/TriangleOscillator.h"
+#include "flowunits/WhiteNoise.h"
 
+#include "FullDuplexAnalyzer.h"
 #include "FullDuplexEcho.h"
-#include "FullDuplexGlitches.h"
-#include "FullDuplexLatency.h"
-#include "FullDuplexStream.h"
+#include "analyzer/GlitchAnalyzer.h"
+#include "analyzer/DataPathAnalyzer.h"
 #include "InputStreamCallbackAnalyzer.h"
 #include "MultiChannelRecording.h"
 #include "OboeStreamCallbackProxy.h"
+#include "OboeTools.h"
 #include "PlayRecordingCallback.h"
 #include "SawPingGenerator.h"
 
@@ -50,23 +60,15 @@
 #define NATIVE_MODE_OPENSLES     1
 #define NATIVE_MODE_AAUDIO       2
 
-#define MAX_SINE_OSCILLATORS     8
+#define MAX_SINE_OSCILLATORS     16
 #define AMPLITUDE_SINE           1.0
 #define AMPLITUDE_SAWTOOTH       0.5
 #define FREQUENCY_SAW_PING       800.0
 #define AMPLITUDE_SAW_PING       0.8
 #define AMPLITUDE_IMPULSE        0.7
 
-#define NANOS_PER_MICROSECOND    ((int64_t) 1000)
-#define NANOS_PER_MILLISECOND    (1000 * NANOS_PER_MICROSECOND)
-#define NANOS_PER_SECOND         (1000 * NANOS_PER_MILLISECOND)
-
-#define LIB_AAUDIO_NAME          "libaaudio.so"
-#define FUNCTION_IS_MMAP         "AAudioStream_isMMapUsed"
 
 #define SECONDS_TO_RECORD        10
-
-typedef struct AAudioStreamStruct         AAudioStream;
 
 /**
  * Abstract base class that corresponds to a test at the Java level.
@@ -75,9 +77,10 @@ class ActivityContext {
 public:
 
     ActivityContext() {}
+
     virtual ~ActivityContext() = default;
 
-    oboe::AudioStream *getStream(int32_t streamIndex) {
+    std::shared_ptr<oboe::AudioStream> getStream(int32_t streamIndex) {
         auto it = mOboeStreams.find(streamIndex);
         if (it != mOboeStreams.end()) {
             return it->second;
@@ -88,32 +91,56 @@ public:
 
     virtual void configureBuilder(bool isInput, oboe::AudioStreamBuilder &builder);
 
+    /**
+     * Open a stream with the given parameters.
+     * @param nativeApi
+     * @param sampleRate
+     * @param channelCount
+     * @param channelMask
+     * @param format
+     * @param sharingMode
+     * @param performanceMode
+     * @param inputPreset
+     * @param deviceId
+     * @param sessionId
+     * @param framesPerBurst
+     * @param channelConversionAllowed
+     * @param formatConversionAllowed
+     * @param rateConversionQuality
+     * @param isMMap
+     * @param isInput
+     * @return stream ID
+     */
     int open(jint nativeApi,
              jint sampleRate,
              jint channelCount,
+             jint channelMask,
              jint format,
              jint sharingMode,
              jint performanceMode,
+             jint inputPreset,
+             jint usage,
+             jint contentType,
+             jint bufferCapacityInFrames,
              jint deviceId,
              jint sessionId,
-             jint framesPerBurst,
+             jboolean channelConversionAllowed,
+             jboolean formatConversionAllowed,
+             jint rateConversionQuality,
+             jboolean isMMap,
              jboolean isInput);
 
+    oboe::Result release();
 
     virtual void close(int32_t streamIndex);
 
-    void printScheduler() {
-#if OBOE_ENABLE_LOGGING
-        int scheduler = audioStreamGateway.getScheduler();
-#endif
-        LOGI("scheduler = 0x%08x, SCHED_FIFO = 0x%08X\n", scheduler, SCHED_FIFO);
-    }
-
-    virtual void configureForStart() {}
+    virtual void configureAfterOpen() {}
 
     oboe::Result start();
 
     oboe::Result pause();
+
+    oboe::Result flush();
 
     oboe::Result stopAllStreams();
 
@@ -121,7 +148,29 @@ public:
         return stopAllStreams();
     }
 
-    virtual void setAmplitude(double amplitude) {}
+    float getCpuLoad() {
+        return oboeCallbackProxy.getCpuLoad();
+    }
+
+    float getAndResetMaxCpuLoad() {
+        return oboeCallbackProxy.getAndResetMaxCpuLoad();
+    }
+
+    uint32_t getAndResetCpuMask() {
+        return oboeCallbackProxy.getAndResetCpuMask();
+    }
+
+    std::string getCallbackTimeString() {
+        return oboeCallbackProxy.getCallbackTimeString();
+    }
+
+    void setWorkload(int32_t workload) {
+        oboeCallbackProxy.setWorkload(workload);
+    }
+
+    void setHearWorkload(bool enabled) {
+        oboeCallbackProxy.setHearWorkload(enabled);
+    }
 
     virtual oboe::Result startPlayback() {
         return oboe::Result::OK;
@@ -134,9 +183,7 @@ public:
     virtual void runBlockingIO() {};
 
     static void threadCallback(ActivityContext *context) {
-        LOGD("%s: called", __func__);
         context->runBlockingIO();
-        LOGD("%s: exiting", __func__);
     }
 
     void stopBlockingIOThread() {
@@ -152,8 +199,65 @@ public:
         return 0.0;
     }
 
-    virtual void setEnabled(bool enabled) {
+    static int64_t getNanoseconds(clockid_t clockId = CLOCK_MONOTONIC) {
+        struct timespec time;
+        int result = clock_gettime(clockId, &time);
+        if (result < 0) {
+            return result;
+        }
+        return (time.tv_sec * NANOS_PER_SECOND) + time.tv_nsec;
     }
+
+    // Calculate time between beginning and when frame[0] occurred.
+    int32_t calculateColdStartLatencyMillis(int32_t sampleRate,
+                                            int64_t beginTimeNanos,
+                                            int64_t timeStampPosition,
+                                            int64_t timestampNanos) const {
+        int64_t elapsedNanos = NANOS_PER_SECOND * (timeStampPosition / (double) sampleRate);
+        int64_t timeOfFrameZero = timestampNanos - elapsedNanos;
+        int64_t coldStartLatencyNanos = timeOfFrameZero - beginTimeNanos;
+        return coldStartLatencyNanos / NANOS_PER_MILLISECOND;
+    }
+
+    int32_t getColdStartInputMillis() {
+        std::shared_ptr<oboe::AudioStream> oboeStream = getInputStream();
+        if (oboeStream != nullptr) {
+            int64_t framesRead = oboeStream->getFramesRead();
+            if (framesRead > 0) {
+                // Base latency on the time that frame[0] would have been received by the app.
+                int64_t nowNanos = getNanoseconds();
+                return calculateColdStartLatencyMillis(oboeStream->getSampleRate(),
+                                                       mInputOpenedAt,
+                                                       framesRead,
+                                                       nowNanos);
+            }
+        }
+        return -1;
+    }
+
+    int32_t getColdStartOutputMillis() {
+        std::shared_ptr<oboe::AudioStream> oboeStream = getOutputStream();
+        if (oboeStream != nullptr) {
+            auto result = oboeStream->getTimestamp(CLOCK_MONOTONIC);
+            if (result) {
+                auto frameTimestamp = result.value();
+                // Calculate the time that frame[0] would have been played by the speaker.
+                int64_t position = frameTimestamp.position;
+                int64_t timestampNanos = frameTimestamp.timestamp;
+                return calculateColdStartLatencyMillis(oboeStream->getSampleRate(),
+                                                       mOutputOpenedAt,
+                                                       position,
+                                                       timestampNanos);
+            }
+        }
+        return -1;
+    }
+
+    /**
+     * Trigger a sound or impulse.
+     * @param enabled
+     */
+    virtual void trigger() {}
 
     bool isMMapUsed(int32_t streamIndex);
 
@@ -165,18 +269,40 @@ public:
         return oboeCallbackProxy.getCallbackCount();
     }
 
+    oboe::Result getLastErrorCallbackResult() {
+        std::shared_ptr<oboe::AudioStream> stream = getOutputStream();
+        if (stream == nullptr) {
+            stream = getInputStream();
+        }
+        return stream ? oboe::Result::ErrorNull : stream->getLastErrorCallbackResult();
+    }
+
+    int32_t getFramesPerCallback() {
+        return oboeCallbackProxy.getFramesPerCallback();
+    }
 
     virtual void setChannelEnabled(int channelIndex, bool enabled) {}
 
+    virtual void setSignalType(int signalType) {}
+
+    virtual void setAmplitude(float amplitude) {}
+
     virtual int32_t saveWaveFile(const char *filename);
 
-    static bool   useCallback;
+    virtual void setMinimumFramesBeforeRead(int32_t numFrames) {}
+
+    static bool   mUseCallback;
     static int    callbackSize;
 
+    double getTimestampLatency(int32_t streamIndex);
+
+    void setCpuAffinityMask(uint32_t mask) {
+        oboeCallbackProxy.setCpuAffinityMask(mask);
+    }
 
 protected:
-    oboe::AudioStream *getInputStream();
-    oboe::AudioStream *getOutputStream();
+    std::shared_ptr<oboe::AudioStream> getInputStream();
+    std::shared_ptr<oboe::AudioStream> getOutputStream();
     int32_t allocateStreamIndex();
     void freeStreamIndex(int32_t streamIndex);
 
@@ -197,18 +323,17 @@ protected:
     std::unique_ptr<MultiChannelRecording>  mRecording{};
 
     int32_t                      mNextStreamHandle = 0;
-    std::unordered_map<int32_t, oboe::AudioStream *>  mOboeStreams;
+    std::unordered_map<int32_t, std::shared_ptr<oboe::AudioStream>>  mOboeStreams;
     int32_t                      mFramesPerBurst = 0; // TODO per stream
     int32_t                      mChannelCount = 0; // TODO per stream
     int32_t                      mSampleRate = 0; // TODO per stream
 
     std::atomic<bool>            threadEnabled{false};
-    std::thread                 *dataThread = nullptr;
-
-    bool                       (*mAAudioStream_isMMap)(AAudioStream *stream) = nullptr;
-    void                        *mLibHandle = nullptr;
+    std::thread                 *dataThread = nullptr; // FIXME never gets deleted
 
 private:
+    int64_t mInputOpenedAt = 0;
+    int64_t mOutputOpenedAt = 0;
 };
 
 /**
@@ -220,7 +345,7 @@ public:
     ActivityTestInput() {}
     virtual ~ActivityTestInput() = default;
 
-    void configureForStart() override;
+    void configureAfterOpen() override;
 
     double getPeakLevel(int index) override {
         return mInputAnalyzer.getPeakLevel(index);
@@ -228,14 +353,27 @@ public:
 
     void runBlockingIO() override;
 
-    InputStreamCallbackAnalyzer  mInputAnalyzer;
+    void setMinimumFramesBeforeRead(int32_t numFrames) override {
+        mInputAnalyzer.setMinimumFramesBeforeRead(numFrames);
+        mMinimumFramesBeforeRead = numFrames;
+    }
+
+    int32_t getMinimumFramesBeforeRead() const {
+        return mMinimumFramesBeforeRead;
+    }
 
 protected:
+
     oboe::Result startStreams() override {
+        mInputAnalyzer.reset();
+        mInputAnalyzer.setup(std::max(getInputStream()->getFramesPerBurst(), callbackSize),
+                             getInputStream()->getChannelCount(),
+                             getInputStream()->getFormat());
         return getInputStream()->requestStart();
     }
 
-private:
+    InputStreamCallbackAnalyzer  mInputAnalyzer;
+    int32_t mMinimumFramesBeforeRead = 0;
 };
 
 /**
@@ -252,10 +390,7 @@ public:
         oboe::Result resultStopPlayback = stopPlayback();
         oboe::Result resultStopAudio = ActivityContext::stop();
 
-        oboe::Result result = (resultStopPlayback != oboe::Result::OK)
-                              ? resultStopPlayback
-                              : resultStopAudio;
-        return result;
+        return (resultStopPlayback != oboe::Result::OK) ? resultStopPlayback : resultStopAudio;
     }
 
     oboe::Result startPlayback() override;
@@ -280,46 +415,59 @@ public:
 
     void close(int32_t streamIndex) override;
 
-    oboe::Result startStreams() override {
-        return getOutputStream()->start();
-    }
+    oboe::Result startStreams() override;
 
-    void configureForStart() override;
+    void configureAfterOpen() override;
 
     virtual void configureStreamGateway();
 
     void runBlockingIO() override;
 
-    void setAmplitude(double amplitude) override {
-        LOGD("%s(%f)", __func__, amplitude);
-        for (int i = 0; i < mChannelCount; i++) {
-            sineOscillators[i].amplitude.setValue(amplitude);
-            sawtoothOscillators[i].amplitude.setValue(amplitude);
-        }
-        impulseGenerator.amplitude.setValue(amplitude);
-    }
-
     void setChannelEnabled(int channelIndex, bool enabled) override;
 
     // WARNING - must match order in strings.xml and OboeAudioOutputStream.java
-    enum ToneType {
-        SawPing = 0,
-        Sine = 1,
-        Impulse = 2,
-        Sawtooth = 3
+    enum SignalType {
+        Sine = 0,
+        Sawtooth = 1,
+        FreqSweep = 2,
+        PitchSweep = 3,
+        WhiteNoise = 4
     };
 
-protected:
-    ToneType                     mToneType = ToneType::Sine;
-    std::vector<SineOscillator>  sineOscillators;
-    std::vector<SawtoothOscillator>  sawtoothOscillators;
+    void setSignalType(int signalType) override {
+        mSignalType = (SignalType) signalType;
+    }
 
-    ImpulseOscillator            impulseGenerator;
+    void setAmplitude(float amplitude) override {
+        mAmplitude = amplitude;
+        if (mVolumeRamp) {
+            mVolumeRamp->setTarget(mAmplitude);
+        }
+    }
+
+protected:
+    SignalType                       mSignalType = SignalType::Sine;
+
+    std::vector<SineOscillator>      sineOscillators;
+    std::vector<SawtoothOscillator>  sawtoothOscillators;
+    static constexpr float           kSweepPeriod = 10.0; // for triangle up and down
+
+    // A triangle LFO is shaped into either a linear or an exponential range for sweep.
+    TriangleOscillator               mTriangleOscillator;
+    LinearShape                      mLinearShape;
+    ExponentialShape                 mExponentialShape;
+    class WhiteNoise                 mWhiteNoise;
+
+    static constexpr int             kRampMSec = 10; // for volume control
+    float                            mAmplitude = 1.0f;
+    std::shared_ptr<RampLinear> mVolumeRamp;
 
     std::unique_ptr<ManyToMultiConverter>   manyToMulti;
     std::unique_ptr<MonoToMultiConverter>   monoToMulti;
-    std::shared_ptr<flowgraph::SinkFloat>   mSinkFloat;
-    std::shared_ptr<flowgraph::SinkI16>     mSinkI16;
+    std::shared_ptr<oboe::flowgraph::SinkFloat>   mSinkFloat;
+    std::shared_ptr<oboe::flowgraph::SinkI16>     mSinkI16;
+    std::shared_ptr<oboe::flowgraph::SinkI24>     mSinkI24;
+    std::shared_ptr<oboe::flowgraph::SinkI32>     mSinkI32;
 };
 
 /**
@@ -331,16 +479,10 @@ public:
     ActivityTapToTone() {}
     virtual ~ActivityTapToTone() = default;
 
-    void configureForStart() override;
+    void configureAfterOpen() override;
 
-    void setAmplitude(double amplitude) override {
-        LOGD("%s(%f)", __func__, amplitude);
-        ActivityTestOutput::setAmplitude(amplitude);
-        sawPingGenerator.amplitude.setValue(amplitude);
-    }
-
-    virtual void setEnabled(bool enabled) override {
-        sawPingGenerator.setEnabled(enabled);
+    virtual void trigger() override {
+        sawPingGenerator.trigger();
     }
 
     SawPingGenerator             sawPingGenerator;
@@ -357,6 +499,10 @@ public:
     virtual int32_t getState() { return -1; }
     virtual int32_t getResult() { return -1; }
     virtual bool isAnalyzerDone() { return false; }
+
+    void setMinimumFramesBeforeRead(int32_t numFrames) override {
+        getFullDuplexAnalyzer()->setMinimumFramesBeforeRead(numFrames);
+    }
 
     virtual FullDuplexAnalyzer *getFullDuplexAnalyzer() = 0;
 
@@ -389,7 +535,11 @@ public:
         }
     }
 
-    virtual FullDuplexAnalyzer *getFullDuplexAnalyzer() override {
+    double getPeakLevel(int index) override {
+        return mFullDuplexEcho->getPeakLevel(index);
+    }
+
+    FullDuplexAnalyzer *getFullDuplexAnalyzer() override {
         return (FullDuplexAnalyzer *) mFullDuplexEcho.get();
     }
 
@@ -405,36 +555,74 @@ private:
  */
 class ActivityRoundTripLatency : public ActivityFullDuplex {
 public:
+    ActivityRoundTripLatency() {
+#define USE_WHITE_NOISE_ANALYZER 1
+#if USE_WHITE_NOISE_ANALYZER
+        // New analyzer that uses a short pattern of white noise bursts.
+        mLatencyAnalyzer = std::make_unique<WhiteNoiseLatencyAnalyzer>();
+#else
+        // Old analyzer based on encoded random bits.
+        mLatencyAnalyzer = std::make_unique<EncodedRandomLatencyAnalyzer>();
+#endif
+        mLatencyAnalyzer->setup();
+    }
+    virtual ~ActivityRoundTripLatency() = default;
 
     oboe::Result startStreams() override {
+        mAnalyzerLaunched = false;
         return mFullDuplexLatency->start();
     }
 
     void configureBuilder(bool isInput, oboe::AudioStreamBuilder &builder) override;
 
     LatencyAnalyzer *getLatencyAnalyzer() {
-        return mFullDuplexLatency->getLatencyAnalyzer();
+        return mLatencyAnalyzer.get();
     }
 
     int32_t getState() override {
         return getLatencyAnalyzer()->getState();
     }
+
     int32_t getResult() override {
-        return getLatencyAnalyzer()->getState();
+        return getLatencyAnalyzer()->getState(); // TODO This does not look right.
     }
+
     bool isAnalyzerDone() override {
-        return mFullDuplexLatency->isDone();
+        if (!mAnalyzerLaunched) {
+            mAnalyzerLaunched = launchAnalysisIfReady();
+        }
+        return mLatencyAnalyzer->isDone();
     }
 
     FullDuplexAnalyzer *getFullDuplexAnalyzer() override {
         return (FullDuplexAnalyzer *) mFullDuplexLatency.get();
     }
 
+    static void analyzeData(LatencyAnalyzer *analyzer) {
+        analyzer->analyze();
+    }
+
+    bool launchAnalysisIfReady() {
+        // Are we ready to do the analysis?
+        if (mLatencyAnalyzer->hasEnoughData()) {
+            // Crunch the numbers on a separate thread.
+            std::thread t(analyzeData, mLatencyAnalyzer.get());
+            t.detach();
+            return true;
+        }
+        return false;
+    }
+
+    jdouble measureTimestampLatency();
+
 protected:
     void finishOpen(bool isInput, oboe::AudioStream *oboeStream) override;
 
 private:
-    std::unique_ptr<FullDuplexLatency>   mFullDuplexLatency{};
+    std::unique_ptr<FullDuplexAnalyzer>   mFullDuplexLatency{};
+
+    std::unique_ptr<LatencyAnalyzer>  mLatencyAnalyzer;
+    bool                              mAnalyzerLaunched = false;
 };
 
 /**
@@ -450,17 +638,19 @@ public:
     void configureBuilder(bool isInput, oboe::AudioStreamBuilder &builder) override;
 
     GlitchAnalyzer *getGlitchAnalyzer() {
-        return mFullDuplexGlitches->getGlitchAnalyzer();
+        return &mGlitchAnalyzer;
     }
 
     int32_t getState() override {
         return getGlitchAnalyzer()->getState();
     }
+
     int32_t getResult() override {
         return getGlitchAnalyzer()->getResult();
     }
+
     bool isAnalyzerDone() override {
-        return mFullDuplexGlitches->isDone();
+        return mGlitchAnalyzer.isDone();
     }
 
     FullDuplexAnalyzer *getFullDuplexAnalyzer() override {
@@ -471,11 +661,88 @@ protected:
     void finishOpen(bool isInput, oboe::AudioStream *oboeStream) override;
 
 private:
-    std::unique_ptr<FullDuplexGlitches>   mFullDuplexGlitches{};
+    std::unique_ptr<FullDuplexAnalyzer>   mFullDuplexGlitches{};
+    GlitchAnalyzer  mGlitchAnalyzer;
 };
 
 /**
- * Switch between various
+ * Measure Data Path
+ */
+class ActivityDataPath : public ActivityFullDuplex {
+public:
+
+    oboe::Result startStreams() override {
+        return mFullDuplexDataPath->start();
+    }
+
+    void configureBuilder(bool isInput, oboe::AudioStreamBuilder &builder) override;
+
+    void configureAfterOpen() override {
+        // set buffer size
+        std::shared_ptr<oboe::AudioStream> outputStream = getOutputStream();
+        int32_t capacityInFrames = outputStream->getBufferCapacityInFrames();
+        int32_t burstInFrames = outputStream->getFramesPerBurst();
+        int32_t capacityInBursts = capacityInFrames / burstInFrames;
+        int32_t sizeInBursts = std::max(2, capacityInBursts / 2);
+        // Set size of buffer to minimize underruns.
+        auto result = outputStream->setBufferSizeInFrames(sizeInBursts * burstInFrames);
+        static_cast<void>(result);  // Avoid unused variable.
+        LOGD("ActivityDataPath: %s() capacity = %d, burst = %d, size = %d",
+             __func__, capacityInFrames, burstInFrames, result.value());
+    }
+
+    DataPathAnalyzer *getDataPathAnalyzer() {
+        return &mDataPathAnalyzer;
+    }
+
+    FullDuplexAnalyzer *getFullDuplexAnalyzer() override {
+        return (FullDuplexAnalyzer *) mFullDuplexDataPath.get();
+    }
+
+protected:
+    void finishOpen(bool isInput, oboe::AudioStream *oboeStream) override;
+
+private:
+    std::unique_ptr<FullDuplexAnalyzer>   mFullDuplexDataPath{};
+
+    DataPathAnalyzer  mDataPathAnalyzer;
+};
+
+/**
+ * Test a single output stream.
+ */
+class ActivityTestDisconnect : public ActivityContext {
+public:
+    ActivityTestDisconnect() {}
+
+    virtual ~ActivityTestDisconnect() = default;
+
+    void close(int32_t streamIndex) override;
+
+    oboe::Result startStreams() override {
+        std::shared_ptr<oboe::AudioStream> outputStream = getOutputStream();
+        if (outputStream) {
+            return outputStream->start();
+        }
+
+        std::shared_ptr<oboe::AudioStream> inputStream = getInputStream();
+        if (inputStream) {
+            return inputStream->start();
+        }
+        return oboe::Result::ErrorNull;
+    }
+
+    void configureAfterOpen() override;
+
+private:
+    std::unique_ptr<SineOscillator>         sineOscillator;
+    std::unique_ptr<MonoToMultiConverter>   monoToMulti;
+    std::shared_ptr<oboe::flowgraph::SinkFloat>   mSinkFloat;
+};
+
+/**
+ * Global context for native tests.
+ * Switch between various ActivityContexts.
  */
 class NativeAudioContext {
 public:
@@ -485,7 +752,6 @@ public:
     };
 
     void setActivityType(int activityType) {
-        LOGD("%s(%d)", __func__, activityType);
         mActivityType = (ActivityType) activityType;
         switch(mActivityType) {
             default:
@@ -511,6 +777,12 @@ public:
             case ActivityType::Glitches:
                 currentActivity = &mActivityGlitches;
                 break;
+            case ActivityType::TestDisconnect:
+                currentActivity = &mActivityTestDisconnect;
+                break;
+            case ActivityType::DataPath:
+                currentActivity = &mActivityDataPath;
+                break;
         }
     }
 
@@ -525,6 +797,8 @@ public:
     ActivityEcho                 mActivityEcho;
     ActivityRoundTripLatency     mActivityRoundTripLatency;
     ActivityGlitches             mActivityGlitches;
+    ActivityDataPath             mActivityDataPath;
+    ActivityTestDisconnect       mActivityTestDisconnect;
 
 private:
 
@@ -538,11 +812,12 @@ private:
         Echo = 4,
         RoundTripLatency = 5,
         Glitches = 6,
+        TestDisconnect = 7,
+        DataPath = 8,
     };
 
     ActivityType                 mActivityType = ActivityType::Undefined;
     ActivityContext             *currentActivity = &mActivityTestOutput;
-
 };
 
 #endif //NATIVEOBOE_NATIVEAUDIOCONTEXT_H

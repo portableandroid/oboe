@@ -17,17 +17,17 @@
 #include <algorithm>
 #include <unistd.h>
 
-#include "AudioProcessorBase.h"
+#include "FlowGraphNode.h"
 #include "SourceI16.h"
 
 #if FLOWGRAPH_ANDROID_INTERNAL
 #include <audio_utils/primitives.h>
 #endif
 
-using namespace flowgraph;
+using namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph;
 
 SourceI16::SourceI16(int32_t channelCount)
-        : AudioSource(channelCount) {
+        : FlowGraphSourceBuffered(channelCount) {
 }
 
 int32_t SourceI16::onProcess(int32_t numFrames) {

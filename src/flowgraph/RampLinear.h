@@ -21,9 +21,9 @@
 #include <unistd.h>
 #include <sys/types.h>
 
-#include "AudioProcessorBase.h"
+#include "FlowGraphNode.h"
 
-namespace flowgraph {
+namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph {
 
 /**
  * When the target is modified then the output will ramp smoothly
@@ -33,7 +33,7 @@ namespace flowgraph {
  * The target may be updated while a ramp is in progress, which will trigger
  * a new ramp from the current value.
  */
-class RampLinear : public AudioProcessorBase {
+class RampLinear : public FlowGraphFilter {
 public:
     explicit RampLinear(int32_t channelCount);
 
@@ -74,8 +74,9 @@ public:
         mLevelTo = level;
     }
 
-    AudioFloatInputPort input;
-    AudioFloatOutputPort output;
+    const char *getName() override {
+        return "RampLinear";
+    }
 
 private:
 
@@ -90,6 +91,6 @@ private:
     float               mLevelTo         = 0.0f;
 };
 
-} /* namespace flowgraph */
+} /* namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph */
 
 #endif //FLOWGRAPH_RAMP_LINEAR_H

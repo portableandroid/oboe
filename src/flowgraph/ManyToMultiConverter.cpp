@@ -18,13 +18,13 @@
 
 #include "ManyToMultiConverter.h"
 
-using namespace flowgraph;
+using namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph;
 
 ManyToMultiConverter::ManyToMultiConverter(int32_t channelCount)
         : inputs(channelCount)
         , output(*this, channelCount) {
     for (int i = 0; i < channelCount; i++) {
-        inputs[i] = std::make_unique<AudioFloatInputPort>(*this, 1);
+        inputs[i] = std::make_unique<FlowGraphPortFloatInput>(*this, 1);
     }
 }
 

@@ -19,56 +19,54 @@
 
 oboe::Result  FullDuplexAnalyzer::start() {
     getLoopbackProcessor()->setSampleRate(getOutputStream()->getSampleRate());
-    getLoopbackProcessor()->reset();
-    return FullDuplexStream::start();
+    getLoopbackProcessor()->prepareToTest();
+    mWriteReadDeltaValid = false;
+    return FullDuplexStreamWithConversion::start();
 }
 
-oboe::DataCallbackResult FullDuplexAnalyzer::onBothStreamsReady(
-        const void *inputData,
+oboe::DataCallbackResult FullDuplexAnalyzer::onBothStreamsReadyFloat(
+        const float *inputData,
         int   numInputFrames,
-        void *outputData,
+        float *outputData,
         int   numOutputFrames) {
 
     int32_t inputStride = getInputStream()->getChannelCount();
     int32_t outputStride = getOutputStream()->getChannelCount();
+    auto *inputFloat = static_cast<const float *>(inputData);
+    float *outputFloat = outputData;
 
-    // TODO Pull up into superclass
-    // reset analyzer if we miss some input data
-    if (numInputFrames < numOutputFrames) {
-        LOGD("numInputFrames (%4d) < numOutputFrames (%4d) so reset analyzer",
-             numInputFrames, numOutputFrames);
-        getLoopbackProcessor()->reset();
-    } else {
-        float *inputFloat = (float *) inputData;
-        float *outputFloat = (float *) outputData;
+    // Get atomic snapshot of the relative frame positions so they
+    // can be used to calculate timestamp latency.
+    int64_t framesRead = getInputStream()->getFramesRead();
+    int64_t framesWritten = getOutputStream()->getFramesWritten();
+    mWriteReadDelta = framesWritten - framesRead;
+    mWriteReadDeltaValid = true;
 
-        (void) getLoopbackProcessor()->process(inputFloat, inputStride,
-                                       outputFloat, outputStride,
-                                       numOutputFrames);
+    (void) getLoopbackProcessor()->process(inputFloat, inputStride, numInputFrames,
+                                   outputFloat, outputStride, numOutputFrames);
 
-        // zero out remainder of output array
-        int32_t framesLeft = numOutputFrames - numInputFrames;
-        outputFloat += numOutputFrames * outputStride;
-
-        if (framesLeft > 0) {
-            memset(outputFloat, 0, framesLeft * getOutputStream()->getBytesPerFrame());
-        }
-    }
-
-    // write the first channel of output and input to the recorder
+    // write the first channel of output and input to the stereo recorder
     if (mRecording != nullptr) {
         float buffer[2];
-        float *inputFloat = (float *) inputData;
-        float *outputFloat = (float *) outputData;
-        for (int i = 0; i < numOutputFrames; i++) {
+        int numBoth = std::min(numInputFrames, numOutputFrames);
+        for (int i = 0; i < numBoth; i++) {
             buffer[0] = *outputFloat;
             outputFloat += outputStride;
-            if (i < numInputFrames) {
-                buffer[1] = *inputFloat;
-                inputFloat += inputStride;
-            } else {
-                buffer[1] = 0.0f;
-            }
+            buffer[1] = *inputFloat;
+            inputFloat += inputStride;
+            mRecording->write(buffer, 1);
+        }
+        // Handle mismatch in in numFrames.
+        buffer[0] = 0.0f; // gap in output
+        for (int i = numBoth; i < numInputFrames; i++) {
+            buffer[1] = *inputFloat;
+            inputFloat += inputStride;
+            mRecording->write(buffer, 1);
+        }
+        buffer[1] = 0.0f; // gap in input
+        for (int i = numBoth; i < numOutputFrames; i++) {
+            buffer[0] = *outputFloat;
+            outputFloat += outputStride;
             mRecording->write(buffer, 1);
         }
     }

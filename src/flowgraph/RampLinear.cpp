@@ -16,14 +16,13 @@
 
 #include <algorithm>
 #include <unistd.h>
-#include "AudioProcessorBase.h"
+#include "FlowGraphNode.h"
 #include "RampLinear.h"
 
-using namespace flowgraph;
+using namespace FLOWGRAPH_OUTER_NAMESPACE::flowgraph;
 
 RampLinear::RampLinear(int32_t channelCount)
-        : input(*this, channelCount)
-        , output(*this, channelCount) {
+        : FlowGraphFilter(channelCount) {
     mTarget.store(1.0f);
 }
 
@@ -33,6 +32,10 @@ void RampLinear::setLengthInFrames(int32_t frames) {
 
 void RampLinear::setTarget(float target) {
     mTarget.store(target);
+    // If the ramp has not been used then start immediately at this level.
+    if (mLastCallCount == kInitialCallCount) {
+        forceCurrent(target);
+    }
 }
 
 float RampLinear::interpolateCurrent() {
